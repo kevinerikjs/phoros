@@ -89,8 +89,12 @@ extension ControllerReport {
 ///
 /// One controller is forwarded at a time: the first with an extended gamepad
 /// profile. When it disconnects, one neutral report with `connected == false`
-/// goes out so the host releases its virtual device. Sampling runs at
-/// `sampleRate` and the throttle keeps the wire quiet while nothing changes.
+/// goes out so the host releases its virtual device.
+///
+/// Reports go out the moment the controller changes (GameController's value
+/// handler), rate-limited to `sampleRate`, and once per keepalive interval
+/// while nothing changes. Polling at 60 Hz instead cost 17 ms of latency at
+/// the median on the harness, half a frame of a 60 Hz game.
 ///
 /// GameController stops delivering input while an iOS app is in the
 /// background, so reports only flow while the client is in the foreground.
@@ -109,7 +113,11 @@ public final class ControllerSampler: @unchecked Sendable {
     private var controller: GCController?
     private var observers: [NSObjectProtocol] = []
     private var timer: DispatchSourceTimer?
+    private var lastSendNanos: UInt64 = 0
+    private var pendingSend = false
     private let queue = DispatchQueue(label: "phoros.controller-sampler", qos: .userInteractive)
+    private static let timebase: mach_timebase_info_data_t = { var t = mach_timebase_info_data_t(); mach_timebase_info(&t); return t }()
+    private static func nanos() -> UInt64 { mach_absolute_time() * UInt64(timebase.numer) / UInt64(timebase.denom) }
 
     public init(sampleRate: Double = 60, keepalive: TimeInterval = 1.0) {
         self.sampleRate = sampleRate
@@ -153,15 +161,45 @@ public final class ControllerSampler: @unchecked Sendable {
     }
 
     private func attach(_ candidate: GCController) {
-        guard candidate.extendedGamepad != nil, controller == nil, accepts?(candidate) ?? true else { return }
+        guard let pad = candidate.extendedGamepad, controller == nil, accepts?(candidate) ?? true else { return }
         controller = candidate
         throttle.reset()
         onAttachmentChange?(true)
+        candidate.handlerQueue = queue
+        pad.valueChangedHandler = { [weak self] pad, _ in self?.changed(pad) }
         startTimer()
+    }
+
+    /// Something moved. Send now unless a report went out less than one
+    /// sample interval ago; then send once at the end of that interval so a
+    /// burst of analog jitter becomes one report and the last state never
+    /// waits for the keepalive.
+    private func changed(_ pad: GCExtendedGamepad) {
+        let now = Self.nanos()
+        let minGap = UInt64(1_000_000_000 / sampleRate)
+        if now &- lastSendNanos >= minGap {
+            emit(pad, now: now)
+        } else if !pendingSend {
+            pendingSend = true
+            let wait = minGap - (now &- lastSendNanos)
+            queue.asyncAfter(deadline: .now() + .nanoseconds(Int(wait))) { [weak self] in
+                guard let self else { return }
+                pendingSend = false
+                if let pad = controller?.extendedGamepad { emit(pad, now: Self.nanos()) }
+            }
+        }
+    }
+
+    private func emit(_ pad: GCExtendedGamepad, now: UInt64) {
+        let report = ControllerReport(pad)
+        guard throttle.shouldSend(report, now: Date()) else { return }
+        lastSendNanos = now
+        onReport?(report, true)
     }
 
     private func detach() {
         stopTimer()
+        controller?.extendedGamepad?.valueChangedHandler = nil
         controller = nil
         onAttachmentChange?(false)
         throttle.reset()
@@ -182,11 +220,11 @@ public final class ControllerSampler: @unchecked Sendable {
         timer = nil
     }
 
+    /// Timer tick: the keepalive path. Unchanged state goes out once per
+    /// keepalive interval; changes already went out from `changed`.
     private func tick() {
         guard let pad = controller?.extendedGamepad else { return }
-        let report = ControllerReport(pad)
-        guard throttle.shouldSend(report, now: Date()) else { return }
-        onReport?(report, true)
+        emit(pad, now: Self.nanos())
     }
 }
 #endif

@@ -16,13 +16,18 @@ public struct VideoEncoderConfiguration: Equatable, Sendable {
     /// client waiting at most that long for a picture.
     public var keyframeInterval: Double
 
+    /// Latency-related encoder settings. The defaults are what measured best
+    /// on the latency harness; see docs/media.md.
+    public var latency: LatencyTuning
+
     public init(
         width: Int32,
         height: Int32,
         frameRate: Double = 30,
         bitrateBitsPerSecond: Int = 6_000_000,
         codec: VideoCodecID = .h264,
-        keyframeInterval: Double = 2
+        keyframeInterval: Double = 2,
+        latency: LatencyTuning = LatencyTuning()
     ) {
         self.width = width
         self.height = height
@@ -30,6 +35,42 @@ public struct VideoEncoderConfiguration: Equatable, Sendable {
         self.bitrateBitsPerSecond = bitrateBitsPerSecond
         self.codec = codec
         self.keyframeInterval = keyframeInterval
+        self.latency = latency
+    }
+
+    public struct LatencyTuning: Equatable, Sendable {
+        /// `kVTCompressionPropertyKey_MaxFrameDelayCount`. 0 asks the encoder
+        /// to emit each frame before accepting the next. `nil` leaves the
+        /// encoder's default.
+        public var maxFrameDelayCount: Int?
+        /// `kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality`.
+        public var prioritizeSpeed: Bool
+        /// `kVTVideoEncoderSpecification_EnableLowLatencyRateControl`: the
+        /// hardware's low-latency rate-control mode. Falls back to a normal
+        /// session when the encoder refuses it.
+        public var lowLatencyRateControl: Bool
+        /// H.264 profile. `.high` keeps the shipped quality; `.baseline` and
+        /// `.main` are cheaper to encode and decode.
+        public var h264Profile: H264Profile
+        /// Peak-rate window: `DataRateLimits` at `burstMultiplier` times the
+        /// average over one second. `nil` disables the limit.
+        public var burstMultiplier: Double?
+
+        public enum H264Profile: Equatable, Sendable { case baseline, main, high }
+
+        public init(
+            maxFrameDelayCount: Int? = nil,
+            prioritizeSpeed: Bool = false,
+            lowLatencyRateControl: Bool = false,
+            h264Profile: H264Profile = .high,
+            burstMultiplier: Double? = 2
+        ) {
+            self.maxFrameDelayCount = maxFrameDelayCount
+            self.prioritizeSpeed = prioritizeSpeed
+            self.lowLatencyRateControl = lowLatencyRateControl
+            self.h264Profile = h264Profile
+            self.burstMultiplier = burstMultiplier
+        }
     }
 }
 
@@ -177,10 +218,20 @@ public final class VideoEncoder: @unchecked Sendable {
         parameterSetsSent = false
         forceKeyframe = false
 
-        let spec = VideoEncoder.hardwareOnlySpecification
+        var spec = VideoEncoder.hardwareOnlySpecification
+        if configuration.latency.lowLatencyRateControl {
+            var dict = (spec as? [String: Any]) ?? [:]
+            dict[kVTVideoEncoderSpecification_EnableLowLatencyRateControl as String] = true
+            spec = dict as CFDictionary
+        }
 
         var created: VTCompressionSession?
         var status = create(codec: configuration.codec, spec: spec, into: &created)
+        if (status != noErr || created == nil), configuration.latency.lowLatencyRateControl {
+            // The hardware refused low-latency rate control; run a normal session.
+            spec = VideoEncoder.hardwareOnlySpecification
+            status = create(codec: configuration.codec, spec: spec, into: &created)
+        }
         if (status != noErr || created == nil), configuration.codec == .hevc {
             // No HEVC encoder here. H.264 is always available; report what actually runs.
             configuration.codec = .h264
@@ -193,12 +244,26 @@ public final class VideoEncoder: @unchecked Sendable {
         let c = configuration
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
+        let h264Profile: CFString
+        switch c.latency.h264Profile {
+        case .baseline: h264Profile = kVTProfileLevel_H264_Baseline_AutoLevel
+        case .main: h264Profile = kVTProfileLevel_H264_Main_AutoLevel
+        case .high: h264Profile = kVTProfileLevel_H264_High_AutoLevel
+        }
         VTSessionSetProperty(
             session, key: kVTCompressionPropertyKey_ProfileLevel,
-            value: c.codec == .hevc ? kVTProfileLevel_HEVC_Main_AutoLevel : kVTProfileLevel_H264_High_AutoLevel
+            value: c.codec == .hevc ? kVTProfileLevel_HEVC_Main_AutoLevel : h264Profile
         )
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: NSNumber(value: c.bitrateBitsPerSecond))
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: [c.bitrateBitsPerSecond * 2, 1] as CFArray)
+        if let burst = c.latency.burstMultiplier {
+            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: [Int(Double(c.bitrateBitsPerSecond) * burst), 1] as CFArray)
+        }
+        if let delay = c.latency.maxFrameDelayCount {
+            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: NSNumber(value: delay))
+        }
+        if c.latency.prioritizeSpeed {
+            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, value: kCFBooleanTrue)
+        }
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: NSNumber(value: c.frameRate))
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: NSNumber(value: Int(c.frameRate * c.keyframeInterval)))
         VTCompressionSessionPrepareToEncodeFrames(session)

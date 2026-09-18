@@ -52,9 +52,21 @@ public final class PhorosConnection: @unchecked Sendable {
     private var ended = false
 
     /// An outbound connection.
+    /// TCP tuned for a live stream: Nagle off, so a 14-byte controller report
+    /// or the last fragment of a frame is never held back waiting for an ACK,
+    /// and the interactive-video service class. Use these for the listener
+    /// on the host and for the outbound connection on the client.
+    public static func parameters() -> NWParameters {
+        let tcp = NWProtocolTCP.Options()
+        tcp.noDelay = true
+        let parameters = NWParameters(tls: nil, tcp: tcp)
+        parameters.serviceClass = .interactiveVideo
+        return parameters
+    }
+
     public init(
         to endpoint: NWEndpoint,
-        parameters: NWParameters = .tcp,
+        parameters: NWParameters = PhorosConnection.parameters(),
         maximumFrameLength: Int = 8 << 20,
         queue: DispatchQueue = DispatchQueue(label: "phoros.connection", qos: .userInteractive)
     ) {
