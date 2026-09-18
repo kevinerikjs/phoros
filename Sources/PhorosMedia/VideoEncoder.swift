@@ -254,10 +254,7 @@ public final class VideoEncoder: @unchecked Sendable {
             session, key: kVTCompressionPropertyKey_ProfileLevel,
             value: c.codec == .hevc ? kVTProfileLevel_HEVC_Main_AutoLevel : h264Profile
         )
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: NSNumber(value: c.bitrateBitsPerSecond))
-        if let burst = c.latency.burstMultiplier {
-            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: [Int(Double(c.bitrateBitsPerSecond) * burst), 1] as CFArray)
-        }
+        applyBitrate(to: session, configuration: c)
         if let delay = c.latency.maxFrameDelayCount {
             VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: NSNumber(value: delay))
         }
@@ -268,6 +265,25 @@ public final class VideoEncoder: @unchecked Sendable {
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: NSNumber(value: Int(c.frameRate * c.keyframeInterval)))
         VTCompressionSessionPrepareToEncodeFrames(session)
         self.session = session
+    }
+
+    private func applyBitrate(to session: VTCompressionSession, configuration c: VideoEncoderConfiguration) {
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: NSNumber(value: c.bitrateBitsPerSecond))
+        if let burst = c.latency.burstMultiplier {
+            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: [Int(Double(c.bitrateBitsPerSecond) * burst), 1] as CFArray)
+        }
+    }
+
+    /// Changes the target bitrate on the running session. No restart, no
+    /// keyframe, no gap: the rate control takes the new target from the next
+    /// frame. Use this for link adaptation; `reconfigure` is for changes the
+    /// session cannot absorb (size, codec, frame rate).
+    public func setBitrate(_ bitsPerSecond: Int) {
+        queue.async { [self] in
+            guard configuration.bitrateBitsPerSecond != bitsPerSecond else { return }
+            configuration.bitrateBitsPerSecond = bitsPerSecond
+            if let session { applyBitrate(to: session, configuration: configuration) }
+        }
     }
 
     private func create(codec: VideoCodecID, spec: CFDictionary?, into session: inout VTCompressionSession?) -> OSStatus {
