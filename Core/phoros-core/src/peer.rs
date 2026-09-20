@@ -204,7 +204,10 @@ pub unsafe extern "C" fn phoros_peer_create(
         // str0m packetizes the Annex B frames the encoder produces and can resend on NACK.
         builder.codec_config().add_h264(PT_H264.into(), Some(PT_H264_RTX.into()), true, 0x64_00_1f);
         builder.codec_config().add_h265(PT_H265.into(), Some(PT_H265_RTX.into()), 1, 0, 120);
-        if is_host { builder = builder.enable_bwe(Some(Bitrate::kbps(4_000))); }
+        // PHOROS_NOBWE=1 builds the host without the bandwidth estimator, and with it str0m's
+        // pacer: an experiment switch for the harness, to tell pacing stalls from the rest.
+        let no_bwe = std::env::var("PHOROS_NOBWE").map(|v| v == "1").unwrap_or(false);
+        if is_host && !no_bwe { builder = builder.enable_bwe(Some(Bitrate::kbps(4_000))); }
         let mut rtc = builder.build(Instant::now());
         rtc.direct_api().set_ice_controlling(!is_host);
         let candidate = Candidate::host(addr, Protocol::Udp).map_err(|_| PHOROS_ERR_NULL)?;
@@ -425,6 +428,7 @@ pub unsafe extern "C" fn phoros_peer_run_own_socket(peer: *mut PhorosPeer) -> i3
     let local = match inner.lock() { Ok(i) => i.local_addr, Err(_) => return PHOROS_ERR_POISONED };
     let socket = match UdpSocket::bind(local) { Ok(s) => s, Err(_) => return PHOROS_ERR_NULL };
     let _ = socket.set_read_timeout(Some(Duration::from_millis(2)));
+    mark_interactive_video(&socket);
     let poke_addr = match UdpSocket::bind((local.ip(), 0)) {
         Ok(p) => { let a = p.local_addr().ok(); if let Ok(mut slot) = peer.poke.lock() { *slot = a.map(|_| (p, local)); } a }
         Err(_) => None,
@@ -478,3 +482,19 @@ pub unsafe extern "C" fn phoros_peer_run_own_socket(peer: *mut PhorosPeer) -> i3
         Err(_) => PHOROS_ERR_NULL,
     }
 }
+
+/// Tags the socket as interactive video (SO_NET_SERVICE_TYPE = NET_SERVICE_TYPE_VI), the same
+/// class the TCP stream uses: on Wi-Fi it puts the datagrams in the video access category
+/// instead of best effort, which is worth ~10 ms per hop on a busy radio.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn mark_interactive_video(socket: &UdpSocket) {
+    use std::os::fd::AsRawFd;
+    const SOL_SOCKET: i32 = 0xffff;
+    const SO_NET_SERVICE_TYPE: i32 = 0x1116;
+    const NET_SERVICE_TYPE_VI: i32 = 3;
+    extern "C" { fn setsockopt(fd: i32, level: i32, name: i32, value: *const c_void, len: u32) -> i32; }
+    let v = NET_SERVICE_TYPE_VI;
+    unsafe { setsockopt(socket.as_raw_fd(), SOL_SOCKET, SO_NET_SERVICE_TYPE, &v as *const i32 as *const c_void, 4); }
+}
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+fn mark_interactive_video(_socket: &UdpSocket) {}
