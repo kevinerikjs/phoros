@@ -66,7 +66,7 @@ The device appears on the first connected report and disappears on a report with
 ```swift
 import Phoros, PhorosInput
 
-let sampler = ControllerSampler()          // 60 Hz, 1 s keepalive
+let sampler = ControllerSampler()          // event driven, at most 60 reports/s, 1 s keepalive
 sampler.onAttachmentChange = { attached in showGamepadBadge(attached) }
 sampler.onReport = { report, connected in
     let flags: UInt8 = connected ? ControllerReport.connectedFlag : 0
@@ -80,7 +80,7 @@ if host.supportsControllerInput { sampler.start() }
 sampler.stop()
 ```
 
-`ControllerSampler` forwards the first connected controller that has an extended gamepad profile. `ReportThrottle` sends a report when the state changed, and otherwise once per keepalive interval. A quiet controller costs one packet a second. A report lost to a reconnect is repaired within that second. When the controller disconnects, one neutral report with `connected == false` goes out and the host releases its device.
+`ControllerSampler` forwards the first connected controller that has an extended gamepad profile. Since 1.4.0 it is event driven: a report goes out when the framework reports a value change, no sooner than `1 / sampleRate` after the previous one, so a press waits on the network and not on the next poll (the 60 Hz poll cost up to 16 ms). `ReportThrottle` sends a report when the state changed, and otherwise once per keepalive interval. A quiet controller costs one packet a second. A report lost to a reconnect is repaired within that second. When the controller disconnects, one neutral report with `connected == false` goes out and the host releases its device.
 
 Start the sampler only for a host that advertised `supportsControllerInput`. A host that predates the flag drops the packets. The client would show a controller badge for input that goes nowhere.
 

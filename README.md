@@ -150,7 +150,7 @@ Every type in `PhorosSession` exists because a shipped build got something wrong
 swift test
 ```
 
-102 tests. The `Phoros` suite pins the exact bytes of every header and the exact JSON of every message as shipped peers send them. A wire break fails here first. The `PhorosSession` suite replays the incidents above. The `PhorosMedia` suite builds a real H.264 format description from real SPS/PPS bytes and round-trips audio through the AAC encoder and decoder. The `PhorosInput` suite pins the HID report descriptor, the mapping from a wire report to HID bytes, and the tap-to-source geometry.
+118 tests. The `Phoros` suite pins the exact bytes of every header and the exact JSON of every message as shipped peers send them. A wire break fails here first. The `PhorosSession` suite replays the incidents above. The `PhorosMedia` suite builds a real H.264 format description from real SPS/PPS bytes and round-trips audio through the AAC encoder and decoder. The `PhorosInput` suite pins the HID report descriptor, the mapping from a wire report to HID bytes, and the tap-to-source geometry.
 
 Before you release an app built on Phoros, also test on real devices in three combinations:
 

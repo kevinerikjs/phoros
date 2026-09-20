@@ -21,6 +21,8 @@ try encoder.start()
 encoder.encode(sampleBuffer)                         // CVPixelBuffer-backed, from any source
 encoder.requestKeyframe()                            // next frame is an IDR
 encoder.reconfigure { $0.width = 1280; $0.height = 720 }
+encoder.setBitrate(3_000_000)                        // live, no restart, no keyframe (1.4.0)
+encoder.onFrameDropped = { … }                       // VideoToolbox chose not to emit a frame (1.4.0)
 ```
 
 Locked in, because each one cost a release to learn:
@@ -33,6 +35,8 @@ Locked in, because each one cost a release to learn:
 | Data rate limit | twice the target bitrate | Bounds keyframe bursts so one keyframe cannot flood a slow link. |
 | Keyframe interval | two seconds | A joining or recovering client waits at most this long for a picture. |
 | Hardware only | required | A software encoder cannot keep up with a live screen and would mask a missing encoder as a slow one. |
+
+`VideoEncoderConfiguration.latency` (1.4.0) holds the knobs the latency harness measured. `lowLatencyRateControl` asks for the hardware's low-latency rate-control mode (`kVTVideoEncoderSpecification_EnableLowLatencyRateControl`): on the reference host it cut encode time from 12.8 to 6.6 ms per 1080p frame and holds the target bitrate on busy content where the default mode overshoots it by half. The session falls back to a normal one when the encoder refuses it. `maxFrameDelayCount`, `prioritizeSpeed` and `h264Profile = .baseline` measured no gain and stay off by default. `keyframeInterval` is on the configuration; the reference host raises it to ten seconds when a link is slow, because a 1080p keyframe is a quarter second of a 6 Mbps link.
 
 If the hardware has no HEVC encoder the session starts as H.264 and says so through `onParameterSets`. `VideoEncoder.isHEVCSupported` probes once for the capability advertisement.
 
