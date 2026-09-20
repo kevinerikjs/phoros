@@ -454,6 +454,7 @@ pub unsafe extern "C" fn phoros_peer_run_own_socket(peer: *mut PhorosPeer) -> i3
         Err(_) => None,
     };
     let handle = std::thread::Builder::new().name("phoros-peer".into()).spawn(move || {
+        raise_thread_priority();
         let mut buf = vec![0u8; 2000];
         let start = Instant::now();
         let drop_percent: u32 = std::env::var("PHOROS_DROP").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
@@ -549,3 +550,14 @@ pub unsafe extern "C" fn phoros_peer_stats(peer: *mut PhorosPeer, out: *mut i64)
     *out.add(1) = peer.wire_delay_max_us.swap(0, Ordering::Relaxed);
     PHOROS_OK
 }
+
+/// The socket thread runs at user-interactive QoS: on iOS a default-priority thread wakes
+/// 1-5 ms late under load (harness: send -> wire p90 4 ms on the phone, 0.2 ms simulator).
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn raise_thread_priority() {
+    const QOS_CLASS_USER_INTERACTIVE: u32 = 0x21;
+    extern "C" { fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32; }
+    unsafe { pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0); }
+}
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+fn raise_thread_priority() {}
