@@ -29,6 +29,8 @@ final class ControlTests: XCTestCase {
         (.audioFormatChanged(AudioFormat(sampleRate: 48_000, channels: 2)),
          #"{"type":"audio_format_changed","payload":{"sampleRate":48000,"channels":2}}"#),
         (.audioEnableRequest(enabled: false), #"{"type":"audio_enable_request","payload":{"enabled":false}}"#),
+        (.bitrateCapRequest(bitsPerSecond: 8_000_000), #"{"type":"bitrate_cap_request","payload":{"bitsPerSecond":8000000}}"#),
+        (.bitrateCapRequest(bitsPerSecond: nil), #"{"type":"bitrate_cap_request","payload":{}}"#),
         (.windowListRequest, #"{"type":"window_list_request"}"#),
         (.windowList([WindowInfo(id: 12, title: "Notes", app: "Notes")]),
          #"{"type":"window_list","payload":{"windows":[{"id":12,"title":"Notes","app":"Notes"}]}}"#),

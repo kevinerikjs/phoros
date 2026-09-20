@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.4.1
+
+Protocol version stays 1. Additive.
+
+- `Phoros`: `ControlMessage.bitrateCapRequest(bitsPerSecond:)`, a client's ceiling on the video bitrate; `nil` lifts it. `Equatable`/JSON round trip covered.
+
 ## 1.4.0
 
 Protocol version stays 1. Additive.

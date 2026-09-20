@@ -208,6 +208,7 @@ JSON object with `type` and, for some types, `payload`. The client sends it bare
 | `video_resume` | client → host | none |
 | `audio_format_changed` | host → client | `{"sampleRate", "channels"}` |
 | `audio_enable_request` | client → host | `{"enabled": bool}`. Only if host `supportsAudioToggle` |
+| `bitrate_cap_request` | client → host | `{"bitsPerSecond": int}` or `{}` to lift. Video never exceeds it, whatever the preset. Since 1.4.1; older hosts ignore it |
 | `window_list_request` | client → host | none |
 | `window_list` | host → client | `{"windows": [{"id", "title", "app"}]}` |
 | `window_select_request` | client → host | `{"windowID": id}`, `0` for full display |

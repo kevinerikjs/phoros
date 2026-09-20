@@ -71,6 +71,11 @@ public enum ControlMessage: Equatable, Sendable {
     /// `supportsAudioToggle` is true; otherwise mute locally.
     case audioEnableRequest(enabled: Bool)
 
+    /// Client to host. Never send video above this many bits per second, whatever the
+    /// preset allows; `nil` lifts the cap. A user's ceiling for a shared or metered link.
+    /// Since 1.4.1; older hosts ignore it.
+    case bitrateCapRequest(bitsPerSecond: Int?)
+
     // MARK: Windows
 
     /// Client to host. Send me the windows you can capture.
@@ -300,6 +305,7 @@ extension ControlMessage {
         case videoResume = "video_resume"
         case audioFormatChanged = "audio_format_changed"
         case audioEnableRequest = "audio_enable_request"
+        case bitrateCapRequest = "bitrate_cap_request"
         case windowListRequest = "window_list_request"
         case windowList = "window_list"
         case windowSelectRequest = "window_select_request"
@@ -323,6 +329,7 @@ extension ControlMessage {
         case .videoResume: return .videoResume
         case .audioFormatChanged: return .audioFormatChanged
         case .audioEnableRequest: return .audioEnableRequest
+        case .bitrateCapRequest: return .bitrateCapRequest
         case .windowListRequest: return .windowListRequest
         case .windowList: return .windowList
         case .windowSelectRequest: return .windowSelectRequest
@@ -341,6 +348,7 @@ extension ControlMessage: Codable {
     private struct QualityValue: Codable { var quality: Double }
     private struct PresetValue: Codable { var preset: QualityPreset }
     private struct EnabledValue: Codable { var enabled: Bool }
+    private struct BitrateCapValue: Codable { var bitsPerSecond: Int? }
     private struct WindowsValue: Codable { var windows: [WindowInfo] }
     private struct WindowIDValue: Codable { var windowID: UInt32 }
 
@@ -372,6 +380,7 @@ extension ControlMessage: Codable {
         case .viewportLockRequest: self = .viewportLockRequest(try payload(ViewportLock.self))
         case .audioFormatChanged: self = .audioFormatChanged(try payload(AudioFormat.self))
         case .audioEnableRequest: self = .audioEnableRequest(enabled: try payload(EnabledValue.self).enabled)
+        case .bitrateCapRequest: self = .bitrateCapRequest(bitsPerSecond: try container.decodeIfPresent(BitrateCapValue.self, forKey: .payload)?.bitsPerSecond)
         case .windowList: self = .windowList(try payload(WindowsValue.self).windows)
         case .windowSelectRequest: self = .windowSelectRequest(windowID: try payload(WindowIDValue.self).windowID)
         case .captureModeChanged: self = .captureModeChanged(try payload(CaptureMode.self))
@@ -398,6 +407,8 @@ extension ControlMessage: Codable {
             try container.encode(format, forKey: .payload)
         case .audioEnableRequest(let enabled):
             try container.encode(EnabledValue(enabled: enabled), forKey: .payload)
+        case .bitrateCapRequest(let bitsPerSecond):
+            try container.encode(BitrateCapValue(bitsPerSecond: bitsPerSecond), forKey: .payload)
         case .windowList(let windows):
             try container.encode(WindowsValue(windows: windows), forKey: .payload)
         case .windowSelectRequest(let windowID):
