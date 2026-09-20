@@ -9,9 +9,14 @@ let package = Package(
     name: "PhorosCore",
     platforms: [.iOS(.v15), .macOS(.v12)],
     products: [.library(name: "PhorosCore", targets: ["PhorosCore"])],
+    dependencies: [.package(path: "..")],
     targets: [
         .binaryTarget(name: "PhorosCoreFFI", path: "build/PhorosCore.xcframework"),
-        .target(name: "PhorosCore", dependencies: ["PhorosCoreFFI"]),
+        .target(name: "PhorosCore", dependencies: [
+            "PhorosCoreFFI",
+            .product(name: "Phoros", package: "phoros"),
+            .product(name: "PhorosSession", package: "phoros")
+        ]),
         .testTarget(name: "PhorosCoreTests", dependencies: ["PhorosCore"])
     ]
 )

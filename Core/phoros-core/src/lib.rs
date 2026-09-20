@@ -23,6 +23,8 @@ pub const PHOROS_ERR_TOO_LARGE: i32 = 2;
 pub const PHOROS_ERR_PANIC: i32 = 3;
 pub const PHOROS_ERR_POISONED: i32 = 4;
 pub const PHOROS_ERR_DESTROYED: i32 = 5;
+/// The send buffer cannot take the message now; retry after the next poll.
+pub const PHOROS_ERR_BUSY: i32 = 6;
 
 /// Largest datagram the core accepts. Anything above is refused, not truncated.
 pub const PHOROS_MAX_DATAGRAM: usize = 65_535;

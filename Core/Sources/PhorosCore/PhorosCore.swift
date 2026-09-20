@@ -20,7 +20,7 @@ public enum CorePoll: Equatable {
 }
 
 public enum CoreError: Int32, Error {
-    case null = 1, tooLarge = 2, panic = 3, poisoned = 4, destroyed = 5
+    case null = 1, tooLarge = 2, panic = 3, poisoned = 4, destroyed = 5, busy = 6
     case unknown = -1
 }
 

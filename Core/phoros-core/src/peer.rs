@@ -15,7 +15,7 @@ use str0m::ice::IceCreds;
 use str0m::net::{DatagramRecv, Protocol, Receive};
 use str0m::{Candidate, Event, Input, Output, Rtc};
 
-use crate::{PHOROS_ERR_NULL, PHOROS_ERR_PANIC, PHOROS_ERR_POISONED, PHOROS_ERR_TOO_LARGE, PHOROS_MAX_DATAGRAM, PHOROS_OK};
+use crate::{PHOROS_ERR_BUSY, PHOROS_ERR_NULL, PHOROS_ERR_PANIC, PHOROS_ERR_POISONED, PHOROS_ERR_TOO_LARGE, PHOROS_MAX_DATAGRAM, PHOROS_OK};
 
 pub const PHOROS_PEER_EVENT_CONNECTED: u32 = 10;
 pub const PHOROS_PEER_EVENT_CHANNEL_OPEN: u32 = 11;
@@ -310,7 +310,9 @@ pub unsafe extern "C" fn phoros_peer_send(peer: *mut PhorosPeer, channel: u32, b
         let id = *inner.channels.get(channel as usize).ok_or(PHOROS_ERR_NULL)?;
         let slice = std::slice::from_raw_parts(bytes, len);
         let mut ch = inner.rtc.channel(id).ok_or(PHOROS_ERR_NULL)?;
-        ch.write(true, slice).map_err(|_| PHOROS_ERR_PANIC)?;
+        // false: the association's send buffer (128 KB across streams) cannot take it now.
+        // The caller queues and retries; the core never buffers beyond what SCTP will.
+        if !ch.write(true, slice).map_err(|_| PHOROS_ERR_PANIC)? { return Err(PHOROS_ERR_BUSY); }
         drop(inner);
         if let Ok(p) = peer.poke.lock() {
             if let Some((sock, to)) = p.as_ref() { let _ = sock.send_to(&[0u8], to); }

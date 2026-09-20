@@ -43,6 +43,10 @@ final class ControlTests: XCTestCase {
         (.clockProbe(ClockProbe(id: 7, sentAt: 1_000_000)), #"{"type":"clock_probe","payload":{"id":7,"sentAt":1000000}}"#),
         (.clockReply(ClockReply(id: 7, sentAt: 1_000_000, receivedAt: 5_000_000, repliedAt: 5_000_020)),
          #"{"type":"clock_reply","payload":{"id":7,"sentAt":1000000,"receivedAt":5000000,"repliedAt":5000020}}"#),
+        (.transportOffer(TransportOffer(kind: "rtc2", address: "192.168.1.2:40000", info: "u\np\nab")),
+         #"{"type":"transport_offer","payload":{"kind":"rtc2","address":"192.168.1.2:40000","info":"u\np\nab"}}"#),
+        (.transportAnswer(TransportOffer(kind: "rtc2", address: "192.168.1.3:40001", info: "v\nq\ncd")),
+         #"{"type":"transport_answer","payload":{"kind":"rtc2","address":"192.168.1.3:40001","info":"v\nq\ncd"}}"#),
     ]
 
     func testEveryMessageDecodesFromItsShippedJSON() throws {
@@ -71,6 +75,7 @@ final class ControlTests: XCTestCase {
             "window_list_request", "window_list", "window_select_request", "capture_mode_changed",
             "media_key",
             "clock_probe", "clock_reply",
+            "transport_offer", "transport_answer",
         ])
     }
 
