@@ -203,8 +203,12 @@ pub unsafe extern "C" fn phoros_peer_create(
     let Some(addr) = cstr(local_addr).and_then(|s| s.parse::<SocketAddr>().ok()) else { return std::ptr::null_mut() };
     let built = guard(|| {
         let provider = Arc::new(str0m_apple_crypto::default_provider());
+        // NACKs go out as soon as a gap is seen (str0m's default waits up to 33 ms); the
+        // interval is a phoros patch on the vendored crate. PHOROS_NACK_MS overrides.
+        let nack_ms: u64 = std::env::var("PHOROS_NACK_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(5);
         let mut builder = Rtc::builder()
             .set_crypto_provider(provider)
+            .set_nack_min_interval(Duration::from_millis(nack_ms))
             .set_ice_lite(is_host)
             .set_local_ice_credentials(IceCreds::new())
             .clear_codecs();
@@ -452,6 +456,8 @@ pub unsafe extern "C" fn phoros_peer_run_own_socket(peer: *mut PhorosPeer) -> i3
     let handle = std::thread::Builder::new().name("phoros-peer".into()).spawn(move || {
         let mut buf = vec![0u8; 2000];
         let start = Instant::now();
+        let drop_percent: u32 = std::env::var("PHOROS_DROP").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+        let mut drop_seed: u32 = 7;
         while !stop.load(Ordering::SeqCst) {
             // drain outbound, then dispatch what the state machine produced, lock released
             let mut pending = Vec::new();
@@ -463,7 +469,11 @@ pub unsafe extern "C" fn phoros_peer_run_own_socket(peer: *mut PhorosPeer) -> i3
                 if inner.rtc.handle_input(Input::Timeout(at)).is_err() { return; }
                 match inner.pump(&mut pending) {
                     Ok(true) => {
-                        if let Some(to) = inner.outbox_to { let _ = socket.send_to(&inner.outbox, to); }
+                        // PHOROS_DROP=<percent>: a harness switch, drops that share of the
+                        // media-sized datagrams on the floor to exercise NACK and RTX.
+                        let dropped = drop_percent > 0 && inner.outbox.len() > 200 && (drop_seed.wrapping_mul(1103515245).wrapping_add(12345) >> 16) % 100 < drop_percent;
+                        drop_seed = drop_seed.wrapping_mul(1103515245).wrapping_add(12345);
+                        if let Some(to) = inner.outbox_to { if !dropped { let _ = socket.send_to(&inner.outbox, to); } }
                         let sent_at = last_send_us.swap(-1, Ordering::Relaxed);
                         if sent_at >= 0 {
                             let d = stats_base.elapsed().as_micros() as i64 - sent_at;

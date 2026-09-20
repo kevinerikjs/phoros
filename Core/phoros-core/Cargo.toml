@@ -13,6 +13,10 @@ crate-type = ["staticlib", "rlib"]
 str0m = { version = "0.23", default-features = false, features = ["apple-crypto"] }
 str0m-apple-crypto = "0.6"
 
+# str0m 0.23.1 with one phoros patch: the NACK interval is configurable (vendor/str0m).
+[patch.crates-io]
+str0m = { path = "vendor/str0m" }
+
 
 [profile.release]
 panic = "unwind"
