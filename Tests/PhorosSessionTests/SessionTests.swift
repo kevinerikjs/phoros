@@ -294,17 +294,19 @@ final class BitrateControllerTests: XCTestCase {
         XCTAssertNil(controller.evaluate(now: t0), "a floor sample alone changes nothing")
         controller.observe(roundTrip: 0.040, now: t0.addingTimeInterval(0.2))
         XCTAssertEqual(controller.queueDelay, 0.038, accuracy: 0.0001)
-        XCTAssertEqual(controller.evaluate(now: t0.addingTimeInterval(0.2)), 7_000_000)
-        controller.observe(roundTrip: 0.040, now: t0.addingTimeInterval(0.3))
-        XCTAssertNil(controller.evaluate(now: t0.addingTimeInterval(0.3)), "too soon for a second decrease")
-        controller.observe(roundTrip: 0.030, now: t0.addingTimeInterval(0.6))
-        XCTAssertNil(controller.evaluate(now: t0.addingTimeInterval(0.6)), "still queued but draining: the first cut is working")
-        controller.observe(roundTrip: 0.040, now: t0.addingTimeInterval(0.9))
-        XCTAssertEqual(controller.evaluate(now: t0.addingTimeInterval(0.9)), 4_900_000, "growing again: cut again")
+        XCTAssertNil(controller.evaluate(now: t0.addingTimeInterval(0.2)), "one sample is a spike")
+        controller.observe(roundTrip: 0.040, now: t0.addingTimeInterval(0.4))
+        XCTAssertEqual(controller.evaluate(now: t0.addingTimeInterval(0.4)), 7_000_000, "two are a queue")
+        controller.observe(roundTrip: 0.040, now: t0.addingTimeInterval(0.5))
+        XCTAssertNil(controller.evaluate(now: t0.addingTimeInterval(0.5)), "too soon for a second decrease")
+        controller.observe(roundTrip: 0.030, now: t0.addingTimeInterval(0.8))
+        XCTAssertNil(controller.evaluate(now: t0.addingTimeInterval(0.8)), "still queued but draining: the first cut is working")
+        controller.observe(roundTrip: 0.040, now: t0.addingTimeInterval(1.1))
+        XCTAssertEqual(controller.evaluate(now: t0.addingTimeInterval(1.1)), 4_900_000, "growing again: cut again")
         // The link clears. One increase after the clear interval, not before.
-        for i in 0..<10 {
-            controller.observe(roundTrip: 0.003, now: t0.addingTimeInterval(1 + Double(i) * 0.2))
-            let result = controller.evaluate(now: t0.addingTimeInterval(1 + Double(i) * 0.2))
+        for i in 0..<12 {
+            controller.observe(roundTrip: 0.003, now: t0.addingTimeInterval(1.2 + Double(i) * 0.2))
+            let result = controller.evaluate(now: t0.addingTimeInterval(1.2 + Double(i) * 0.2))
             if Double(i) * 0.2 < 2 { XCTAssertNil(result, "step \(i)") } else { XCTAssertEqual(result, 5_635_000); break }
         }
     }
@@ -316,6 +318,8 @@ final class BitrateControllerTests: XCTestCase {
         controller.observe(roundTrip: 0.003, now: t0)
         controller.observe(roundTrip: 0.003, now: t0.addingTimeInterval(0.7))
         XCTAssertEqual(controller.evaluate(now: t0.addingTimeInterval(0.7)), 6_000_000, "slow start: 1.5x every 0.6 s")
+        controller.observe(roundTrip: 0.200, now: t0.addingTimeInterval(0.9))
+        XCTAssertNil(controller.evaluate(now: t0.addingTimeInterval(0.9)))
         controller.observe(roundTrip: 0.200, now: t0.addingTimeInterval(1.0))
         XCTAssertEqual(controller.evaluate(now: t0.addingTimeInterval(1.0)), 3_000_000, "a severe queue halves the rate")
         controller.observe(roundTrip: 0.003, now: t0.addingTimeInterval(1.2))
@@ -328,7 +332,8 @@ final class BitrateControllerTests: XCTestCase {
         let t0 = Date()
         controller.observe(roundTrip: 0.001, now: t0)
         controller.observe(roundTrip: 0.100, now: t0.addingTimeInterval(0.2))
-        XCTAssertEqual(controller.evaluate(now: t0.addingTimeInterval(0.2)), 1_500_000)
+        controller.observe(roundTrip: 0.100, now: t0.addingTimeInterval(0.4))
+        XCTAssertEqual(controller.evaluate(now: t0.addingTimeInterval(0.4)), 1_500_000)
         controller.observe(roundTrip: 0.100, now: t0.addingTimeInterval(0.6))
         XCTAssertNil(controller.evaluate(now: t0.addingTimeInterval(0.6)), "already at the floor")
         controller.setMaximum(1_200_000)

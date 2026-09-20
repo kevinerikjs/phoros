@@ -152,7 +152,7 @@ if let rtt = probe.receivedPong(), pingSentAt > lastKeyframeBurstEnd {   // a pi
 }
 ```
 
-The controller cuts 0.7x while the queueing delay (round trip minus its recent floor) holds or grows, 0.5x above 150 ms, and climbs 1.15x every two seconds once it is clear. A new link starts at 4 Mbps and climbs 1.5x every 0.6 s until the first cut. `setMaximum` follows a preset change. The `QualityLadder` below stays the structural fallback for a link that cannot carry the preset at all.
+The controller cuts 0.7x once the queueing delay (round trip minus its recent floor) has held or grown for two samples (one high sample is a Wi-Fi spike, two are a queue), 0.5x above 150 ms, and climbs 1.15x every two seconds once it is clear. A new link starts at 4 Mbps and climbs 1.5x every 0.6 s until the first cut. `setMaximum` follows a preset change. The `QualityLadder` below stays the structural fallback for a link that cannot carry the preset at all.
 
 ## Pause and resume
 

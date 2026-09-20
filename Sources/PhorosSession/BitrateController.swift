@@ -34,6 +34,10 @@ public struct BitrateControllerPolicy: Equatable, Sendable {
     /// taking `decreaseFactor`: the queue is already seconds of video and
     /// every step spent on the way down is another second of it.
     public var severeAbove: TimeInterval
+    /// Congested samples in a row before a cut. Wi-Fi shows single round
+    /// trips of 30 to 50 ms with nothing queued (a scan, a retry); one
+    /// sample is a spike, two are a queue.
+    public var samplesBeforeCut: Int
 
     public init(
         minimumBitrate: Int = 1_000_000,
@@ -47,7 +51,8 @@ public struct BitrateControllerPolicy: Equatable, Sendable {
         initialBitrate: Int = 4_000_000,
         startFactor: Double = 1.5,
         startInterval: TimeInterval = 0.6,
-        severeAbove: TimeInterval = 0.15
+        severeAbove: TimeInterval = 0.15,
+        samplesBeforeCut: Int = 2
     ) {
         self.minimumBitrate = minimumBitrate
         self.congestedAbove = congestedAbove
@@ -61,6 +66,7 @@ public struct BitrateControllerPolicy: Equatable, Sendable {
         self.startFactor = startFactor
         self.startInterval = startInterval
         self.severeAbove = severeAbove
+        self.samplesBeforeCut = samplesBeforeCut
     }
 }
 
@@ -99,6 +105,7 @@ public struct BitrateController: Sendable {
     private var congested = false
     private var previousQueueDelay: TimeInterval = 0
     private var everCongested = false
+    private var congestedRun = 0
 
     public init(maximum: Int, policy: BitrateControllerPolicy = BitrateControllerPolicy()) {
         self.policy = policy
@@ -123,14 +130,18 @@ public struct BitrateController: Sendable {
         previousQueueDelay = queueDelay
         queueDelay = max(0, roundTrip - floor)
         if queueDelay > policy.congestedAbove {
+            congestedRun += 1
             // A queue that is already draining needs no second cut: the last
             // one is working, and cutting again on the same backlog ends far
-            // below what the link carries. Cut when the delay holds or grows.
-            congested = queueDelay >= previousQueueDelay * 0.9
+            // below what the link carries. Cut when the delay holds or grows,
+            // and only once it has been seen enough times to be a queue.
+            congested = congestedRun >= policy.samplesBeforeCut && queueDelay >= previousQueueDelay * 0.9
             clearSince = nil
         } else if queueDelay < policy.clearBelow {
+            congestedRun = 0
             if clearSince == nil { clearSince = now }
         } else {
+            congestedRun = 0
             clearSince = nil
         }
     }
@@ -166,6 +177,7 @@ public struct BitrateController: Sendable {
         floor = nil
         queueDelay = 0
         congested = false
+        congestedRun = 0
         clearSince = nil
         lastDecrease = .distantPast
         everCongested = false
