@@ -14,6 +14,8 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
+pub mod peer;
+
 /// Status of every call. Zero is success.
 pub const PHOROS_OK: i32 = 0;
 pub const PHOROS_ERR_NULL: i32 = 1;

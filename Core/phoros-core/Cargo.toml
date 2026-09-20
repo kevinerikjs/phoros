@@ -10,7 +10,9 @@ name = "phoros_core"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-str0m = { version = "0.23", default-features = false }
+str0m = { version = "0.23", default-features = false, features = ["apple-crypto"] }
+str0m-apple-crypto = "0.6"
+
 
 [profile.release]
 panic = "unwind"

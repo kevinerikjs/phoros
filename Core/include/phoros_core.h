@@ -6,6 +6,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -36,6 +37,21 @@ int32_t phoros_core_feed(PhorosCore *core, const uint8_t *bytes, size_t len, int
 int32_t phoros_core_poll(PhorosCore *core, int64_t now_us, PhorosPoll *out);
 int32_t phoros_core_test_panic(PhorosCore *core);
 int32_t phoros_core_test_poison(PhorosCore *core);
+
+/* Peer: a str0m session (ICE, DTLS, SCTP, two data channels) behind the same rules. */
+typedef struct PhorosPeer PhorosPeer;
+enum { PHOROS_PEER_EVENT_CONNECTED = 10, PHOROS_PEER_EVENT_CHANNEL_OPEN = 11, PHOROS_PEER_EVENT_ICE_STATE = 12, PHOROS_PEER_EVENT_DISCONNECTED = 13 };
+enum { PHOROS_CHANNEL_RELIABLE = 0, PHOROS_CHANNEL_REALTIME = 1 };
+typedef void (*PhorosDataCallback)(void *user, uint32_t channel, const uint8_t *bytes, size_t len);
+
+PhorosPeer *phoros_peer_create(void *user, PhorosEventCallback on_event, PhorosDataCallback on_data, bool is_host, const char *local_addr);
+void phoros_peer_destroy(PhorosPeer *peer);
+int32_t phoros_peer_local_info(PhorosPeer *peer, char *out, size_t capacity);
+int32_t phoros_peer_set_remote(PhorosPeer *peer, const char *info, const char *remote_addr, int64_t now_us);
+int32_t phoros_peer_feed(PhorosPeer *peer, const uint8_t *bytes, size_t len, const char *source, int64_t now_us);
+int32_t phoros_peer_poll(PhorosPeer *peer, int64_t now_us, PhorosPoll *out);
+int32_t phoros_peer_send(PhorosPeer *peer, uint32_t channel, const uint8_t *bytes, size_t len);
+int32_t phoros_peer_run_own_socket(PhorosPeer *peer);
 
 #ifdef __cplusplus
 }
