@@ -165,9 +165,18 @@ public final class RealtimePeer {
     public func wireDelay() -> (last: Int64, max: Int64) {
         lock.lock(); defer { lock.unlock() }
         guard let handle else { return (0, 0) }
-        var out: [Int64] = [0, 0]
+        var out: [Int64] = [0, 0, 0]
         _ = phoros_peer_stats(handle, &out)
         return (out[0], out[1])
+    }
+
+    /// Harness stats: microseconds since the last datagram was read off the socket.
+    public func sinceLastReceive() -> Int64 {
+        lock.lock(); defer { lock.unlock() }
+        guard let handle else { return -1 }
+        var out: [Int64] = [0, 0, 0]
+        _ = phoros_peer_stats(handle, &out)
+        return out[2]
     }
 
     /// Design B: the core binds `localAddress` and runs its own thread.

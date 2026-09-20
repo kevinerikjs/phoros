@@ -1204,7 +1204,11 @@ impl Session {
             .calculate(has_active_media, current_estimate, is_overuse);
 
         self.pacer.set_padding_rate(result.padding_rate);
-        self.pacer.set_pacing_rate(result.pacing_rate);
+        // phoros patch: the estimate drives the encoder, never the wire. Pacing at the
+        // estimate held frames for hundreds of ms whenever TWCC undershot a rate-controlled
+        // screen stream; packets go out as soon as they exist.
+        let _ = result.pacing_rate;
+        self.pacer.set_pacing_rate(Bitrate::gbps(10));
     }
 
     fn has_active_outgoing_media(&self) -> bool {

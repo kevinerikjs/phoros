@@ -96,6 +96,8 @@ pub struct PhorosPeer {
     last_send_us: Arc<std::sync::atomic::AtomicI64>,
     wire_delay_last_us: Arc<std::sync::atomic::AtomicI64>,
     wire_delay_max_us: Arc<std::sync::atomic::AtomicI64>,
+    /// When the last datagram was read off the socket (micros since `stats_base`).
+    last_recv_us: Arc<std::sync::atomic::AtomicI64>,
     service_class: std::sync::atomic::AtomicI32,
 }
 
@@ -216,10 +218,11 @@ pub unsafe extern "C" fn phoros_peer_create(
         // str0m packetizes the Annex B frames the encoder produces and can resend on NACK.
         builder.codec_config().add_h264(PT_H264.into(), Some(PT_H264_RTX.into()), true, 0x64_00_1f);
         builder.codec_config().add_h265(PT_H265.into(), Some(PT_H265_RTX.into()), 1, 0, 120);
-        // No bandwidth estimator by default: with it comes str0m's pacer, which paces at the
-        // estimate and held frames 100-1000 ms whenever TWCC undershot our rate-controlled
-        // stream. PHOROS_BWE=1 turns it back on for experiments.
-        let bwe = std::env::var("PHOROS_BWE").map(|v| v == "1").unwrap_or(false);
+        // The bandwidth estimator is on: its estimate drives the encoder through the
+        // BANDWIDTH event. Its pacer is neutered in the vendored str0m (packets leave as
+        // they exist); paced at the estimate it held frames for hundreds of ms.
+        // PHOROS_BWE=0 turns the estimator off for experiments.
+        let bwe = std::env::var("PHOROS_BWE").map(|v| v != "0").unwrap_or(true);
         if is_host && bwe { builder = builder.enable_bwe(Some(Bitrate::kbps(4_000))); }
         let mut rtc = builder.build(Instant::now());
         rtc.direct_api().set_ice_controlling(!is_host);
@@ -241,6 +244,7 @@ pub unsafe extern "C" fn phoros_peer_create(
         last_send_us: Arc::new(std::sync::atomic::AtomicI64::new(-1)),
         wire_delay_last_us: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         wire_delay_max_us: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+        last_recv_us: Arc::new(std::sync::atomic::AtomicI64::new(-1)),
         service_class: std::sync::atomic::AtomicI32::new(3),
     });
     Box::into_raw(peer)
@@ -448,8 +452,8 @@ pub unsafe extern "C" fn phoros_peer_run_own_socket(peer: *mut PhorosPeer) -> i3
     let socket = match UdpSocket::bind(local) { Ok(s) => s, Err(_) => return PHOROS_ERR_NULL };
     let _ = socket.set_read_timeout(Some(Duration::from_millis(2)));
     set_service_class(&socket, peer.service_class.load(Ordering::Relaxed));
-    let (last_send_us, wire_delay_last, wire_delay_max, stats_base) =
-        (Arc::clone(&peer.last_send_us), Arc::clone(&peer.wire_delay_last_us), Arc::clone(&peer.wire_delay_max_us), peer.stats_base);
+    let (last_send_us, wire_delay_last, wire_delay_max, stats_base, last_recv_us) =
+        (Arc::clone(&peer.last_send_us), Arc::clone(&peer.wire_delay_last_us), Arc::clone(&peer.wire_delay_max_us), peer.stats_base, Arc::clone(&peer.last_recv_us));
     let poke_addr = match UdpSocket::bind((local.ip(), 0)) {
         Ok(p) => { let a = p.local_addr().ok(); if let Ok(mut slot) = peer.poke.lock() { *slot = a.map(|_| (p, local)); } a }
         Err(_) => None,
@@ -499,6 +503,7 @@ pub unsafe extern "C" fn phoros_peer_run_own_socket(peer: *mut PhorosPeer) -> i3
             match socket.recv_from(&mut buf) {
                 Ok((_, from)) if Some(from) == poke_addr => {}   // a poke: loop and drain
                 Ok((n, from)) => {
+                    last_recv_us.store(stats_base.elapsed().as_micros() as i64, Ordering::Relaxed);
                     let mut inner = match inner.lock() { Ok(i) => i, Err(_) => return };
                     let now_us = start.elapsed().as_micros() as i64;
                     let at = inner.instant(now_us);
@@ -542,13 +547,16 @@ pub unsafe extern "C" fn phoros_peer_set_service_class(peer: *mut PhorosPeer, cl
 }
 
 /// Harness stats: `out[0]` = last send -> wire delay in micros, `out[1]` = the worst so far
-/// (reset to 0 on read).
+/// (reset to 0 on read), `out[2]` = micros since the last datagram was read off the socket.
 #[no_mangle]
 pub unsafe extern "C" fn phoros_peer_stats(peer: *mut PhorosPeer, out: *mut i64) -> i32 {
     if peer.is_null() || out.is_null() { return PHOROS_ERR_NULL; }
     let peer = &*peer;
     *out.add(0) = peer.wire_delay_last_us.load(Ordering::Relaxed);
     *out.add(1) = peer.wire_delay_max_us.swap(0, Ordering::Relaxed);
+    // out[2]: micros since the last datagram was read off the socket (-1 before any)
+    let r = peer.last_recv_us.load(Ordering::Relaxed);
+    *out.add(2) = if r < 0 { -1 } else { peer.stats_base.elapsed().as_micros() as i64 - r };
     PHOROS_OK
 }
 
