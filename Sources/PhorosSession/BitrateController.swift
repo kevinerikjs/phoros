@@ -20,16 +20,34 @@ public struct BitrateControllerPolicy: Equatable, Sendable {
     public var increaseInterval: TimeInterval
     /// Round trips older than this no longer count toward the floor.
     public var floorWindow: TimeInterval
+    /// Where a new link starts, if the ceiling is above it. The link's
+    /// capacity is unknown until the first round trips, and a queue built
+    /// in the first second takes many seconds to drain. Zero starts at the
+    /// ceiling.
+    public var initialBitrate: Int
+    /// Multiplied into the bitrate on a clear verdict before the first
+    /// congestion verdict, and how often. Slow start: the link has shown no
+    /// limit yet, so climb fast.
+    public var startFactor: Double
+    public var startInterval: TimeInterval
+    /// Queueing delay above which one cut halves the rate instead of
+    /// taking `decreaseFactor`: the queue is already seconds of video and
+    /// every step spent on the way down is another second of it.
+    public var severeAbove: TimeInterval
 
     public init(
         minimumBitrate: Int = 1_000_000,
         congestedAbove: TimeInterval = 0.020,
         clearBelow: TimeInterval = 0.008,
         decreaseFactor: Double = 0.7,
-        increaseFactor: Double = 1.1,
+        increaseFactor: Double = 1.15,
         decreaseInterval: TimeInterval = 0.3,
         increaseInterval: TimeInterval = 2,
-        floorWindow: TimeInterval = 20
+        floorWindow: TimeInterval = 20,
+        initialBitrate: Int = 4_000_000,
+        startFactor: Double = 1.5,
+        startInterval: TimeInterval = 0.6,
+        severeAbove: TimeInterval = 0.15
     ) {
         self.minimumBitrate = minimumBitrate
         self.congestedAbove = congestedAbove
@@ -39,6 +57,10 @@ public struct BitrateControllerPolicy: Equatable, Sendable {
         self.decreaseInterval = decreaseInterval
         self.increaseInterval = increaseInterval
         self.floorWindow = floorWindow
+        self.initialBitrate = initialBitrate
+        self.startFactor = startFactor
+        self.startInterval = startInterval
+        self.severeAbove = severeAbove
     }
 }
 
@@ -76,11 +98,12 @@ public struct BitrateController: Sendable {
     private var clearSince: Date?
     private var congested = false
     private var previousQueueDelay: TimeInterval = 0
+    private var everCongested = false
 
     public init(maximum: Int, policy: BitrateControllerPolicy = BitrateControllerPolicy()) {
         self.policy = policy
         self.maximum = maximum
-        self.current = maximum
+        self.current = policy.initialBitrate > 0 ? min(maximum, max(policy.minimumBitrate, policy.initialBitrate)) : maximum
     }
 
     /// A new ceiling, for a preset change. The current bitrate follows it
@@ -117,16 +140,20 @@ public struct BitrateController: Sendable {
     public mutating func evaluate(now: Date = Date()) -> Int? {
         if congested {
             congested = false
+            everCongested = true
             guard now.timeIntervalSince(lastDecrease) >= policy.decreaseInterval else { return nil }
-            let next = max(policy.minimumBitrate, Int(Double(current) * policy.decreaseFactor))
+            let factor = queueDelay > policy.severeAbove ? min(0.5, policy.decreaseFactor) : policy.decreaseFactor
+            let next = max(policy.minimumBitrate, Int(Double(current) * factor))
             lastDecrease = now
             guard next != current else { return nil }
             current = next
             return current
         }
-        if let clearSince, now.timeIntervalSince(clearSince) >= policy.increaseInterval, current < maximum {
+        let interval = everCongested ? policy.increaseInterval : policy.startInterval
+        let factor = everCongested ? policy.increaseFactor : policy.startFactor
+        if let clearSince, now.timeIntervalSince(clearSince) >= interval, current < maximum {
             self.clearSince = now
-            let next = min(maximum, max(current + 1, Int(Double(current) * policy.increaseFactor)))
+            let next = min(maximum, max(current + 1, Int(Double(current) * factor)))
             current = next
             return current
         }
@@ -141,6 +168,7 @@ public struct BitrateController: Sendable {
         congested = false
         clearSince = nil
         lastDecrease = .distantPast
-        current = maximum
+        everCongested = false
+        current = policy.initialBitrate > 0 ? min(maximum, max(policy.minimumBitrate, policy.initialBitrate)) : maximum
     }
 }

@@ -106,6 +106,13 @@ public final class VideoEncoder: @unchecked Sendable {
     /// Encoding errors that did not stop the session.
     public var onError: ((OSStatus) -> Void)?
 
+    /// Called on the encoder queue when VideoToolbox drops a frame instead of
+    /// encoding it (`kVTEncodeInfo_FrameDropped`).
+    public var onFrameDropped: (() -> Void)?
+
+    /// Frames VideoToolbox dropped since `start`.
+    public private(set) var droppedFrames = 0
+
     public private(set) var configuration: VideoEncoderConfiguration
     private var session: VTCompressionSession?
     private var parameterSetsSent = false
@@ -298,7 +305,13 @@ public final class VideoEncoder: @unchecked Sendable {
         )
     }
 
-    fileprivate func handleOutput(status: OSStatus, sampleBuffer: CMSampleBuffer?) {
+    fileprivate func handleOutput(status: OSStatus, infoFlags: VTEncodeInfoFlags, sampleBuffer: CMSampleBuffer?) {
+        if infoFlags.contains(.frameDropped) {
+            // The encoder chose not to emit this frame: real-time mode behind, or the
+            // low-latency rate control holding its bitrate. Nothing reaches the wire.
+            droppedFrames += 1
+            onFrameDropped?()
+        }
         guard status == noErr, let sampleBuffer, sampleBuffer.isValid else {
             if status != noErr { onError?(status) }
             return
@@ -338,5 +351,5 @@ private func phorosCompressionOutput(
     sampleBuffer: CMSampleBuffer?
 ) {
     guard let refcon else { return }
-    Unmanaged<VideoEncoder>.fromOpaque(refcon).takeUnretainedValue().handleOutput(status: status, sampleBuffer: sampleBuffer)
+    Unmanaged<VideoEncoder>.fromOpaque(refcon).takeUnretainedValue().handleOutput(status: status, infoFlags: infoFlags, sampleBuffer: sampleBuffer)
 }

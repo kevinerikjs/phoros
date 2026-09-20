@@ -109,10 +109,14 @@ public struct SendScheduler: Sendable {
     public struct Write: Equatable, Sendable {
         public let data: Data
         public let lane: SendLane
+        /// The caller's identifier for a video frame (`enqueueVideoFrame(tag:)`),
+        /// zero for anything else. For tracing, the scheduler does not read it.
+        public let tag: Int
 
-        public init(data: Data, lane: SendLane) {
+        public init(data: Data, lane: SendLane, tag: Int = 0) {
             self.data = data
             self.lane = lane
+            self.tag = tag
         }
     }
 
@@ -124,6 +128,7 @@ public struct SendScheduler: Sendable {
         var data: Data
         var isKeyframe: Bool
         var enqueuedAt: Date
+        var tag: Int
     }
 
     private var control: [Data] = []
@@ -148,8 +153,17 @@ public struct SendScheduler: Sendable {
     public private(set) var skippedCaptureFrames = 0
 
     /// Bytes per second the transport drained while it had a backlog, as an
-    /// exponential average over completions. Zero until measured.
+    /// exponential average over completions. Zero until measured. A transport
+    /// that can measure the link better (from its socket buffer, say) sets it
+    /// through `reportDrainRate`.
     public private(set) var drainRate: Double = 0
+
+    /// Bytes the transport still holds below the scheduler: a kernel socket
+    /// buffer, for one. A write completes when the kernel accepts it, not when
+    /// the peer has it, and that buffer can grow to megabytes on a slow link.
+    /// Counted toward the video budget like the scheduler's own backlog. The
+    /// transport reports it; zero when it cannot.
+    public var transportBacklog = 0
     private var drainWindowStart: Date?
     private var drainWindowBytes = 0
 
@@ -184,10 +198,20 @@ public struct SendScheduler: Sendable {
             droppedVideoFrames += 1
             return false
         }
-        if bytesInFlight + queuedVideoBytes <= videoByteBudget { return true }
+        if videoBytesPending <= videoByteBudget { return true }
         droppedVideoFrames += 1
         needsKeyframe = true
         return false
+    }
+
+    /// Video bytes between the encoder and the peer as far as the scheduler
+    /// can see: queued here, handed to the transport, and held by it.
+    public var videoBytesPending: Int { bytesInFlight + queuedVideoBytes + transportBacklog }
+
+    /// A link rate measured outside the scheduler replaces its own estimate.
+    public mutating func reportDrainRate(_ bytesPerSecond: Double) {
+        guard bytesPerSecond > 0 else { return }
+        drainRate = bytesPerSecond
     }
 
     /// Whether a captured frame is worth encoding now. False while the
@@ -196,7 +220,7 @@ public struct SendScheduler: Sendable {
     /// that is larger than everything it replaced. Gate captures with this and
     /// `admitVideo` becomes the exception path.
     public func shouldEncodeVideo() -> Bool {
-        bytesInFlight + queuedVideoBytes <= videoByteBudget
+        videoBytesPending <= videoByteBudget
     }
 
     /// `shouldEncodeVideo` with the skip counted.
@@ -239,10 +263,10 @@ public struct SendScheduler: Sendable {
     /// Queue one video frame as its already-framed packets. They go to the
     /// transport as one write, in order, so a frame is either wholly queued,
     /// wholly in flight or wholly dropped.
-    public mutating func enqueueVideoFrame(_ packets: [Data], isKeyframe: Bool, now: Date = Date()) {
+    public mutating func enqueueVideoFrame(_ packets: [Data], isKeyframe: Bool, now: Date = Date(), tag: Int = 0) {
         var data = Data()
         for packet in packets { data.append(packet) }
-        video.append(QueuedFrame(data: data, isKeyframe: isKeyframe, enqueuedAt: now))
+        video.append(QueuedFrame(data: data, isKeyframe: isKeyframe, enqueuedAt: now, tag: tag))
         queuedVideoBytes += data.count
         if isKeyframe { needsKeyframe = false }
     }
@@ -258,9 +282,14 @@ public struct SendScheduler: Sendable {
         } else if !audio.isEmpty {
             write = Write(data: audio.removeFirst(), lane: .audio)
         } else if !video.isEmpty {
+            // Hold video while the transport already holds a budget's worth:
+            // a frame parked here can still be shed by age, a frame in the
+            // socket buffer cannot. Keyframes go regardless, the peer is
+            // waiting on them.
+            if let first = video.first, !first.isKeyframe, bytesInFlight + transportBacklog > videoByteBudget { return nil }
             let frame = video.removeFirst()
             queuedVideoBytes -= frame.data.count
-            write = Write(data: frame.data, lane: .video)
+            write = Write(data: frame.data, lane: .video, tag: frame.tag)
         } else {
             return nil
         }

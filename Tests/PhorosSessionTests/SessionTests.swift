@@ -234,9 +234,35 @@ final class SendSchedulerGateTests: XCTestCase {
     }
 }
 
+final class SendSchedulerTransportBacklogTests: XCTestCase {
+    func testTransportBacklogCountsTowardTheBudgetAndHoldsDeltas() {
+        var scheduler = SendScheduler(policy: SendPolicy(maximumQueuedBytes: 10_000))
+        scheduler.transportBacklog = 12_000
+        XCTAssertFalse(scheduler.shouldEncodeVideo(), "the kernel already holds more than the budget")
+        scheduler.enqueueVideoFrame([Data(count: 100)], isKeyframe: false)
+        XCTAssertNil(scheduler.dequeue(), "a delta waits while the transport is full")
+        XCTAssertEqual(scheduler.queuedVideo.frames, 1)
+        scheduler.enqueueVideoFrame([Data(count: 100)], isKeyframe: true)
+        scheduler.dropQueuedVideo()
+        scheduler.enqueueVideoFrame([Data(count: 100)], isKeyframe: true)
+        XCTAssertNotNil(scheduler.dequeue(), "a keyframe goes regardless")
+        scheduler.transportBacklog = 0
+        scheduler.enqueueVideoFrame([Data(count: 100)], isKeyframe: false)
+        XCTAssertNotNil(scheduler.dequeue())
+    }
+
+    func testReportedDrainRateReplacesTheEstimate() {
+        var scheduler = SendScheduler(policy: SendPolicy(maximumQueuedBytes: 192 * 1024, maximumQueueDelay: 0.03, minimumQueuedBytes: 1_000))
+        scheduler.reportDrainRate(500_000)
+        XCTAssertEqual(scheduler.videoByteBudget, 15_000)
+        scheduler.reportDrainRate(0)
+        XCTAssertEqual(scheduler.drainRate, 500_000, "zero is not a measurement")
+    }
+}
+
 final class BitrateControllerTests: XCTestCase {
     func testQueueingDelayStepsDownAndClearLinkStepsUp() {
-        var controller = BitrateController(maximum: 10_000_000)
+        var controller = BitrateController(maximum: 10_000_000, policy: BitrateControllerPolicy(initialBitrate: 0))
         let t0 = Date()
         controller.observe(roundTrip: 0.002, now: t0)
         XCTAssertNil(controller.evaluate(now: t0), "a floor sample alone changes nothing")
@@ -253,8 +279,22 @@ final class BitrateControllerTests: XCTestCase {
         for i in 0..<10 {
             controller.observe(roundTrip: 0.003, now: t0.addingTimeInterval(1 + Double(i) * 0.2))
             let result = controller.evaluate(now: t0.addingTimeInterval(1 + Double(i) * 0.2))
-            if Double(i) * 0.2 < 2 { XCTAssertNil(result, "step \(i)") } else { XCTAssertEqual(result, 5_390_000); break }
+            if Double(i) * 0.2 < 2 { XCTAssertNil(result, "step \(i)") } else { XCTAssertEqual(result, 5_635_000); break }
         }
+    }
+
+    func testSlowStartClimbsFastUntilTheFirstCongestion() {
+        var controller = BitrateController(maximum: 10_000_000)
+        XCTAssertEqual(controller.current, 4_000_000, "a new link starts below the ceiling")
+        let t0 = Date()
+        controller.observe(roundTrip: 0.003, now: t0)
+        controller.observe(roundTrip: 0.003, now: t0.addingTimeInterval(0.7))
+        XCTAssertEqual(controller.evaluate(now: t0.addingTimeInterval(0.7)), 6_000_000, "slow start: 1.5x every 0.6 s")
+        controller.observe(roundTrip: 0.200, now: t0.addingTimeInterval(1.0))
+        XCTAssertEqual(controller.evaluate(now: t0.addingTimeInterval(1.0)), 3_000_000, "a severe queue halves the rate")
+        controller.observe(roundTrip: 0.003, now: t0.addingTimeInterval(1.2))
+        controller.observe(roundTrip: 0.003, now: t0.addingTimeInterval(2.0))
+        XCTAssertNil(controller.evaluate(now: t0.addingTimeInterval(2.0)), "after congestion the climb is the slow one")
     }
 
     func testNeverBelowMinimumOrAboveMaximum() {
