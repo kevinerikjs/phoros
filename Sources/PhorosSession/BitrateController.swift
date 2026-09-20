@@ -38,6 +38,13 @@ public struct BitrateControllerPolicy: Equatable, Sendable {
     /// trips of 30 to 50 ms with nothing queued (a scan, a retry); one
     /// sample is a spike, two are a queue.
     public var samplesBeforeCut: Int
+    /// A high round trip counts as congestion only when the transport held
+    /// at least this many unsent or unacknowledged bytes at the time. A
+    /// radio that sleeps between packets or an access point that scans
+    /// delays a ping just as much as a queue does, but leaves nothing
+    /// waiting on the sender; cutting the bitrate then costs quality and
+    /// buys nothing. Zero counts every high round trip.
+    public var backlogForCongestion: Int
 
     public init(
         minimumBitrate: Int = 1_000_000,
@@ -52,7 +59,8 @@ public struct BitrateControllerPolicy: Equatable, Sendable {
         startFactor: Double = 1.5,
         startInterval: TimeInterval = 0.6,
         severeAbove: TimeInterval = 0.15,
-        samplesBeforeCut: Int = 2
+        samplesBeforeCut: Int = 2,
+        backlogForCongestion: Int = 8 * 1024
     ) {
         self.minimumBitrate = minimumBitrate
         self.congestedAbove = congestedAbove
@@ -67,6 +75,7 @@ public struct BitrateControllerPolicy: Equatable, Sendable {
         self.startInterval = startInterval
         self.severeAbove = severeAbove
         self.samplesBeforeCut = samplesBeforeCut
+        self.backlogForCongestion = backlogForCongestion
     }
 }
 
@@ -121,7 +130,10 @@ public struct BitrateController: Sendable {
     }
 
     /// One measured round trip of a control message on the media connection.
-    public mutating func observe(roundTrip: TimeInterval, now: Date = Date()) {
+    /// `transportBacklog` is what the transport held when the ping went out
+    /// (the kernel's unacknowledged bytes on TCP); pass `Int.max` when the
+    /// transport cannot say, and every high round trip counts.
+    public mutating func observe(roundTrip: TimeInterval, transportBacklog: Int = Int.max, now: Date = Date()) {
         samples.append((now, roundTrip))
         let cutoff = now.addingTimeInterval(-policy.floorWindow)
         samples.removeAll { $0.at < cutoff }
@@ -129,7 +141,12 @@ public struct BitrateController: Sendable {
         self.floor = floor
         previousQueueDelay = queueDelay
         queueDelay = max(0, roundTrip - floor)
-        if queueDelay > policy.congestedAbove {
+        if queueDelay > policy.congestedAbove, transportBacklog < policy.backlogForCongestion {
+            // Delay with nothing waiting on our side: the link, not our queue.
+            congested = false
+            congestedRun = 0
+            clearSince = nil
+        } else if queueDelay > policy.congestedAbove {
             congestedRun += 1
             // A queue that is already draining needs no second cut: the last
             // one is working, and cutting again on the same backlog ends far

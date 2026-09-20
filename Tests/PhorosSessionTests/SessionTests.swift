@@ -327,6 +327,19 @@ final class BitrateControllerTests: XCTestCase {
         XCTAssertNil(controller.evaluate(now: t0.addingTimeInterval(2.0)), "after congestion the climb is the slow one")
     }
 
+    func testDelayWithoutBacklogIsTheLinkNotAQueue() {
+        var controller = BitrateController(maximum: 10_000_000, policy: BitrateControllerPolicy(initialBitrate: 0))
+        let t0 = Date()
+        controller.observe(roundTrip: 0.006, transportBacklog: 0, now: t0)
+        for i in 1...6 {
+            controller.observe(roundTrip: 0.080, transportBacklog: 0, now: t0.addingTimeInterval(Double(i) * 0.2))
+            XCTAssertNil(controller.evaluate(now: t0.addingTimeInterval(Double(i) * 0.2)), "a sleeping radio is not congestion")
+        }
+        controller.observe(roundTrip: 0.080, transportBacklog: 40_000, now: t0.addingTimeInterval(1.4))
+        controller.observe(roundTrip: 0.080, transportBacklog: 40_000, now: t0.addingTimeInterval(1.6))
+        XCTAssertEqual(controller.evaluate(now: t0.addingTimeInterval(1.6)), 7_000_000, "bytes waiting on our side: a queue")
+    }
+
     func testNeverBelowMinimumOrAboveMaximum() {
         var controller = BitrateController(maximum: 2_000_000, policy: BitrateControllerPolicy(minimumBitrate: 1_500_000))
         let t0 = Date()
