@@ -151,6 +151,25 @@ public final class RealtimePeer {
         return phoros_peer_set_desired_bitrate(handle, UInt64(max(0, bitsPerSecond)))
     }
 
+    /// The socket's service class, set before `runOwnSocket`: 0 best effort, 3 video
+    /// (default), 4 voice. On Wi-Fi this is the WMM access category.
+    @discardableResult
+    public func setServiceClass(_ serviceClass: Int32) -> Int32 {
+        lock.lock(); defer { lock.unlock() }
+        guard let handle else { return Int32(PHOROS_ERR_DESTROYED) }
+        return phoros_peer_set_service_class(handle, serviceClass)
+    }
+
+    /// Harness stats: the last send -> wire delay and the worst since the previous read, in
+    /// microseconds.
+    public func wireDelay() -> (last: Int64, max: Int64) {
+        lock.lock(); defer { lock.unlock() }
+        guard let handle else { return (0, 0) }
+        var out: [Int64] = [0, 0]
+        _ = phoros_peer_stats(handle, &out)
+        return (out[0], out[1])
+    }
+
     /// Design B: the core binds `localAddress` and runs its own thread.
     @discardableResult
     public func runOwnSocket() -> Int32 {

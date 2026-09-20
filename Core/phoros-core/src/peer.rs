@@ -89,6 +89,14 @@ pub struct PhorosPeer {
     /// Design B: a send from another thread pokes the loop out of `recv_from` with one
     /// byte to its own socket, so a transmit never waits for the read timeout.
     poke: Mutex<Option<(UdpSocket, SocketAddr)>>,
+    /// Harness stats: when the last send was called (micros since `stats_base`), the delay
+    /// send -> datagram on the wire for the last send and the worst one, and the socket's
+    /// service class (0 best effort, 3 video, 4 voice), applied at bind.
+    stats_base: Instant,
+    last_send_us: Arc<std::sync::atomic::AtomicI64>,
+    wire_delay_last_us: Arc<std::sync::atomic::AtomicI64>,
+    wire_delay_max_us: Arc<std::sync::atomic::AtomicI64>,
+    service_class: std::sync::atomic::AtomicI32,
 }
 
 impl Inner {
@@ -224,6 +232,11 @@ pub unsafe extern "C" fn phoros_peer_create(
         socket_thread: Mutex::new(None),
         stop: Arc::new(AtomicBool::new(false)),
         poke: Mutex::new(None),
+        stats_base: Instant::now(),
+        last_send_us: Arc::new(std::sync::atomic::AtomicI64::new(-1)),
+        wire_delay_last_us: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+        wire_delay_max_us: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+        service_class: std::sync::atomic::AtomicI32::new(3),
     });
     Box::into_raw(peer)
 }
@@ -370,6 +383,7 @@ pub unsafe extern "C" fn phoros_peer_send(peer: *mut PhorosPeer, channel: u32, b
         // The caller queues and retries; the core never buffers beyond what SCTP will.
         if !ch.write(true, slice).map_err(|_| PHOROS_ERR_PANIC)? { return Err(PHOROS_ERR_BUSY); }
         drop(inner);
+        peer.last_send_us.store(peer.stats_base.elapsed().as_micros() as i64, Ordering::Relaxed);
         if let Ok(p) = peer.poke.lock() {
             if let Some((sock, to)) = p.as_ref() { let _ = sock.send_to(&[0u8], to); }
         }
@@ -428,7 +442,9 @@ pub unsafe extern "C" fn phoros_peer_run_own_socket(peer: *mut PhorosPeer) -> i3
     let local = match inner.lock() { Ok(i) => i.local_addr, Err(_) => return PHOROS_ERR_POISONED };
     let socket = match UdpSocket::bind(local) { Ok(s) => s, Err(_) => return PHOROS_ERR_NULL };
     let _ = socket.set_read_timeout(Some(Duration::from_millis(2)));
-    mark_interactive_video(&socket);
+    set_service_class(&socket, peer.service_class.load(Ordering::Relaxed));
+    let (last_send_us, wire_delay_last, wire_delay_max, stats_base) =
+        (Arc::clone(&peer.last_send_us), Arc::clone(&peer.wire_delay_last_us), Arc::clone(&peer.wire_delay_max_us), peer.stats_base);
     let poke_addr = match UdpSocket::bind((local.ip(), 0)) {
         Ok(p) => { let a = p.local_addr().ok(); if let Ok(mut slot) = peer.poke.lock() { *slot = a.map(|_| (p, local)); } a }
         Err(_) => None,
@@ -448,6 +464,12 @@ pub unsafe extern "C" fn phoros_peer_run_own_socket(peer: *mut PhorosPeer) -> i3
                 match inner.pump(&mut pending) {
                     Ok(true) => {
                         if let Some(to) = inner.outbox_to { let _ = socket.send_to(&inner.outbox, to); }
+                        let sent_at = last_send_us.swap(-1, Ordering::Relaxed);
+                        if sent_at >= 0 {
+                            let d = stats_base.elapsed().as_micros() as i64 - sent_at;
+                            wire_delay_last.store(d, Ordering::Relaxed);
+                            wire_delay_max.fetch_max(d, Ordering::Relaxed);
+                        }
                     }
                     Ok(false) => { callbacks = inner.callbacks(); break; }
                     Err(_) => return,
@@ -483,18 +505,37 @@ pub unsafe extern "C" fn phoros_peer_run_own_socket(peer: *mut PhorosPeer) -> i3
     }
 }
 
-/// Tags the socket as interactive video (SO_NET_SERVICE_TYPE = NET_SERVICE_TYPE_VI), the same
-/// class the TCP stream uses: on Wi-Fi it puts the datagrams in the video access category
-/// instead of best effort, which is worth ~10 ms per hop on a busy radio.
+/// Sets SO_NET_SERVICE_TYPE on the socket: 0 best effort, 3 video (NET_SERVICE_TYPE_VI, the
+/// class the TCP stream uses), 4 voice (NET_SERVICE_TYPE_VO). On Wi-Fi this picks the WMM
+/// access category, which decides how long a datagram waits for airtime.
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-fn mark_interactive_video(socket: &UdpSocket) {
+fn set_service_class(socket: &UdpSocket, class: i32) {
     use std::os::fd::AsRawFd;
     const SOL_SOCKET: i32 = 0xffff;
     const SO_NET_SERVICE_TYPE: i32 = 0x1116;
-    const NET_SERVICE_TYPE_VI: i32 = 3;
     extern "C" { fn setsockopt(fd: i32, level: i32, name: i32, value: *const c_void, len: u32) -> i32; }
-    let v = NET_SERVICE_TYPE_VI;
-    unsafe { setsockopt(socket.as_raw_fd(), SOL_SOCKET, SO_NET_SERVICE_TYPE, &v as *const i32 as *const c_void, 4); }
+    if class <= 0 { return; }
+    unsafe { setsockopt(socket.as_raw_fd(), SOL_SOCKET, SO_NET_SERVICE_TYPE, &class as *const i32 as *const c_void, 4); }
 }
 #[cfg(not(any(target_os = "macos", target_os = "ios")))]
-fn mark_interactive_video(_socket: &UdpSocket) {}
+fn set_service_class(_socket: &UdpSocket, _class: i32) {}
+
+/// Chooses the socket's service class before `phoros_peer_run_own_socket`: 0 best effort,
+/// 3 video (default), 4 voice.
+#[no_mangle]
+pub unsafe extern "C" fn phoros_peer_set_service_class(peer: *mut PhorosPeer, class: i32) -> i32 {
+    if peer.is_null() { return PHOROS_ERR_NULL; }
+    (*peer).service_class.store(class, Ordering::Relaxed);
+    PHOROS_OK
+}
+
+/// Harness stats: `out[0]` = last send -> wire delay in micros, `out[1]` = the worst so far
+/// (reset to 0 on read).
+#[no_mangle]
+pub unsafe extern "C" fn phoros_peer_stats(peer: *mut PhorosPeer, out: *mut i64) -> i32 {
+    if peer.is_null() || out.is_null() { return PHOROS_ERR_NULL; }
+    let peer = &*peer;
+    *out.add(0) = peer.wire_delay_last_us.load(Ordering::Relaxed);
+    *out.add(1) = peer.wire_delay_max_us.swap(0, Ordering::Relaxed);
+    PHOROS_OK
+}

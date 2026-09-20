@@ -57,6 +57,8 @@ int32_t phoros_peer_run_own_socket(PhorosPeer *peer);
 enum { PHOROS_CHANNEL_VIDEO = 100, PHOROS_PEER_EVENT_BANDWIDTH = 14, PHOROS_CODEC_H264 = 0, PHOROS_CODEC_H265 = 1 };
 int32_t phoros_peer_send_video(PhorosPeer *peer, const uint8_t *bytes, size_t len, int64_t pts_us, uint32_t codec, bool is_keyframe);
 int32_t phoros_peer_set_desired_bitrate(PhorosPeer *peer, uint64_t bits_per_second);
+int32_t phoros_peer_set_service_class(PhorosPeer *peer, int32_t service_class);
+int32_t phoros_peer_stats(PhorosPeer *peer, int64_t *out);
 
 #ifdef __cplusplus
 }
