@@ -60,6 +60,10 @@ public struct ControllerReport: Equatable, Sendable {
     public var rightY: Int16 = 0
     public var leftTrigger: UInt8 = 0
     public var rightTrigger: UInt8 = 0
+    /// Optional trailing sequence number (two bytes after the fourteen). A client that
+    /// sends the same report on more than one transport numbers them so the host can take
+    /// the first copy and drop a stale one; hosts that do not know it ignore the bytes.
+    public var sequence: UInt16?
 
     /// Nothing pressed, sticks centred, triggers released.
     public static let neutral = ControllerReport()
@@ -68,8 +72,10 @@ public struct ControllerReport: Equatable, Sendable {
         buttons: Buttons = [],
         leftX: Int16 = 0, leftY: Int16 = 0,
         rightX: Int16 = 0, rightY: Int16 = 0,
-        leftTrigger: UInt8 = 0, rightTrigger: UInt8 = 0
+        leftTrigger: UInt8 = 0, rightTrigger: UInt8 = 0,
+        sequence: UInt16? = nil
     ) {
+        self.sequence = sequence
         self.buttons = buttons
         self.leftX = leftX
         self.leftY = leftY
@@ -89,11 +95,17 @@ public struct ControllerReport: Equatable, Sendable {
         out.appendBigEndian(rightY)
         out.append(leftTrigger)
         out.append(rightTrigger)
+        if let sequence { out.appendBigEndian(sequence) }
         return out
     }
 
+    /// True when `sequence` is newer than `previous` (wrapping, 16 bit).
+    public static func isNewer(_ sequence: UInt16, than previous: UInt16) -> Bool {
+        Int16(bitPattern: sequence &- previous) > 0
+    }
+
     /// Reads a report from the first fourteen bytes of `data`, or `nil` when
-    /// there are fewer. `data` may be a slice.
+    /// there are fewer, and the sequence from two more when present. `data` may be a slice.
     public static func parse(from data: Data) -> ControllerReport? {
         guard data.count >= ControllerReport.size else { return nil }
         let base = data.startIndex
@@ -104,7 +116,8 @@ public struct ControllerReport: Equatable, Sendable {
             rightX: data.readBigEndian(Int16.self, at: base + 8),
             rightY: data.readBigEndian(Int16.self, at: base + 10),
             leftTrigger: data[base + 12],
-            rightTrigger: data[base + 13]
+            rightTrigger: data[base + 13],
+            sequence: data.count >= ControllerReport.size + 2 ? data.readBigEndian(UInt16.self, at: base + 14) : nil
         )
     }
 }
