@@ -5,3 +5,5 @@ xcuserdata/
 *.xcodeproj
 phoros-2.md
 phoros-ultra.md
+Core/build/
+Core/phoros-core/target/

@@ -1,0 +1,33 @@
+# Phoros Core
+
+The Rust half of Phoros 2 (BEAM-49): a sans-IO realtime state machine behind a C ABI, built as an XCFramework and wrapped by a thin Swift target. This directory is its own Swift package, separate from the main one on purpose: a binary target whose file is missing breaks every consumer's resolution, and the XCFramework is built locally until it ships as a release artifact.
+
+```
+Core/
+├── phoros-core/       # the Rust crate (cargo test works on its own)
+├── include/           # phoros_core.h and the module map, the whole ABI
+├── build.sh           # cargo for four Apple targets, lipo, xcodebuild -create-xcframework
+├── Sources/PhorosCore # RealtimeCore, the Swift wrapper
+└── Tests              # the boundary tests
+```
+
+```
+./build.sh          # needs rustup targets aarch64-apple-darwin, x86_64-apple-darwin, aarch64-apple-ios, aarch64-apple-ios-sim
+swift test          # macOS
+xcodebuild test -scheme PhorosCore -destination 'platform=iOS Simulator,name=iPhone 17'
+```
+
+## The contract at the boundary
+
+- The core owns no socket, clock or thread. Swift feeds it bytes with the time, polls it for what to do next (transmit these bytes, or call again by this time), and runs callbacks on the calling thread.
+- Every entry point takes a handle and returns a status. A Rust panic is caught at the boundary and returned as `PHOROS_ERR_PANIC`; the handle is then poisoned and every later call returns `PHOROS_ERR_POISONED`. Nothing unwinds into Swift.
+- Buffers fed in are copied by the core if it keeps them; the caller's buffer is never retained. A buffer handed out by `poll` belongs to the core and is valid until the next call on that handle.
+- Callbacks run with the core's lock released, so a callback may call back into the core.
+- Datagrams above 65535 bytes are refused, not truncated. Zero-length is a valid call.
+- Threading misuse (two threads driving one handle) serializes on the core's lock; it cannot corrupt state.
+
+## Measured
+
+Boundary tests: 10,000 create/destroy cycles leave no handle alive; teardown fires its callback once; calls after destroy throw; a panic is contained and poisons; eight threads feeding 8,000 datagrams count correctly; a callback can re-enter. Cost of the boundary for a 1400-byte datagram through `feed` plus `poll`, including the one `Data` copy to a contiguous buffer: 141 ns on an M4 (about 10 GB/s), so the FFI is not where latency goes.
+
+str0m 0.23 is linked and its builder runs on every target, so the real state machine has a proven place to go. Static library size is large (four targets, 133 MB on disk) because `panic = "unwind"` and no symbol stripping are needed for containment and debugging; the app links only what it uses.

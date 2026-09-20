@@ -1,0 +1,20 @@
+[package]
+name = "phoros-core"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "The realtime core behind Phoros 2: a sans-IO state machine with a C ABI, built as an XCFramework."
+
+[lib]
+name = "phoros_core"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+str0m = { version = "0.23", default-features = false }
+
+[profile.release]
+panic = "unwind"
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = "debuginfo"

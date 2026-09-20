@@ -1,0 +1,4 @@
+module PhorosCoreFFI {
+    header "phoros_core.h"
+    export *
+}
