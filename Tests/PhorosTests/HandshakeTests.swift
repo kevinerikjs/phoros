@@ -68,6 +68,28 @@ final class HandshakeTests: XCTestCase {
         XCTAssertFalse(PeerCapabilities(try JSONDecoder().decode(PairingMessage.self, from: explicitNo)).supportsControllerInput)
     }
 
+    func testClockSyncCapabilityIsAdvertisedOnlyWhenTrue() throws {
+        let host = PairingMessage(type: .authSuccess, supportsClockSync: true)
+        XCTAssertEqual(try json(host)["supportsClockSync"] as? Bool, true)
+        XCTAssertTrue(PeerCapabilities(host).supportsClockSync)
+        XCTAssertNil(try json(PairingMessage(type: .authSuccess))["supportsClockSync"])
+        XCTAssertFalse(PeerCapabilities(PairingMessage(type: .authSuccess)).supportsClockSync)
+    }
+
+    func testMaximumFrameRateRaisesOnlySixtyFpsPresets() throws {
+        let request = PairingMessage(type: .authRequest, maximumFrameRate: 120)
+        XCTAssertEqual(try json(request)["maximumFrameRate"] as? Double, 120)
+        let peer = PeerCapabilities(request)
+        XCTAssertEqual(peer.videoFrameRate(preset: 60, hostRefreshRate: 165), 120, "the client's display is the limit")
+        XCTAssertEqual(peer.videoFrameRate(preset: 60, hostRefreshRate: 60), 60, "the host's display is the limit")
+        XCTAssertEqual(peer.videoFrameRate(preset: 30, hostRefreshRate: 165), 30, "30 fps presets stay at 30")
+
+        let legacy = PeerCapabilities(PairingMessage(type: .authRequest))
+        XCTAssertNil(legacy.maximumFrameRate)
+        XCTAssertEqual(legacy.videoFrameRate(preset: 60, hostRefreshRate: 165), 60, "absent means the preset's rate")
+        XCTAssertNil(PeerCapabilities(PairingMessage(type: .authRequest, maximumFrameRate: 0)).maximumFrameRate)
+    }
+
     // MARK: Capability interpretation
 
     func testAbsentCodecListMeansLegacyCodecsOnly() {

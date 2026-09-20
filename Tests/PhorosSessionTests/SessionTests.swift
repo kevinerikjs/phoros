@@ -260,6 +260,32 @@ final class SendSchedulerTransportBacklogTests: XCTestCase {
     }
 }
 
+final class ClockSyncTests: XCTestCase {
+    func testOffsetComesFromTheShortestRoundTrip() {
+        var sync = ClockSync()
+        XCTAssertNil(sync.offset)
+        // Host clock runs 5 s ahead. First exchange: 2 ms each way.
+        let p1 = sync.probe(now: 1_000_000)
+        XCTAssertEqual(sync.reply(ClockReply(id: p1.id, sentAt: p1.sentAt, receivedAt: 6_002_000, repliedAt: 6_002_100), now: 1_004_100), 4_000)
+        XCTAssertEqual(sync.offset, 5_000_000)
+        // Second exchange: 40 ms queued on the way there. Worse sample, ignored for the offset.
+        let p2 = sync.probe(now: 2_000_000)
+        XCTAssertEqual(sync.reply(ClockReply(id: p2.id, sentAt: p2.sentAt, receivedAt: 7_042_000, repliedAt: 7_042_100), now: 2_044_100), 44_000)
+        XCTAssertEqual(sync.offset, 5_000_000)
+        XCTAssertEqual(sync.bestRoundTrip, 4_000)
+        XCTAssertEqual(sync.lastRoundTrip, 44_000)
+        XCTAssertEqual(sync.age(ofPresentationTimestamp: 7_000_000, now: 2_030_000), 30_000, "a frame captured 30 ms ago")
+    }
+
+    func testReplyToUnknownProbeIsIgnored() {
+        var sync = ClockSync()
+        XCTAssertNil(sync.reply(ClockReply(id: 99, sentAt: 1, receivedAt: 2, repliedAt: 3), now: 4))
+        let p = sync.probe(now: 10)
+        XCTAssertNil(sync.reply(ClockReply(id: p.id, sentAt: 11, receivedAt: 2, repliedAt: 3), now: 4), "sentAt must echo")
+        XCTAssertNil(sync.offset)
+    }
+}
+
 final class BitrateControllerTests: XCTestCase {
     func testQueueingDelayStepsDownAndClearLinkStepsUp() {
         var controller = BitrateController(maximum: 10_000_000, policy: BitrateControllerPolicy(initialBitrate: 0))

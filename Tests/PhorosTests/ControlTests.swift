@@ -38,6 +38,9 @@ final class ControlTests: XCTestCase {
         (.mediaKey(MediaKeyCommand(key: .playPause, controlID: "b1", keystroke: "\n", keystrokeModifiers: 256,
                                    click: Click(x: 0.5, y: 0.5, button: "right"))),
          #"{"type":"media_key","payload":{"key":"play_pause","controlID":"b1","keystroke":"\n","keystrokeModifiers":256,"click":{"x":0.5,"y":0.5,"button":"right"}}}"#),
+        (.clockProbe(ClockProbe(id: 7, sentAt: 1_000_000)), #"{"type":"clock_probe","payload":{"id":7,"sentAt":1000000}}"#),
+        (.clockReply(ClockReply(id: 7, sentAt: 1_000_000, receivedAt: 5_000_000, repliedAt: 5_000_020)),
+         #"{"type":"clock_reply","payload":{"id":7,"sentAt":1000000,"receivedAt":5000000,"repliedAt":5000020}}"#),
     ]
 
     func testEveryMessageDecodesFromItsShippedJSON() throws {
@@ -65,6 +68,7 @@ final class ControlTests: XCTestCase {
             "audio_format_changed", "audio_enable_request",
             "window_list_request", "window_list", "window_select_request", "capture_mode_changed",
             "media_key",
+            "clock_probe", "clock_reply",
         ])
     }
 
@@ -96,6 +100,18 @@ final class ControlTests: XCTestCase {
     func testWrongShapedPayloadIsRejectedNotCoerced() {
         // {"enabled": true} is a valid object; it is not a window selection.
         XCTAssertThrowsError(try decode(#"{"type":"window_select_request","payload":{"enabled":true}}"#))
+    }
+
+    func testClockProbeAndReplyRoundTrip() throws {
+        let probe = ControlMessage.clockProbe(ClockProbe(id: 7, sentAt: 1_000_000))
+        let probeObject = try object(probe)
+        XCTAssertEqual(probeObject["type"] as? String, "clock_probe")
+        XCTAssertEqual((probeObject["payload"] as? [String: Any])?["sentAt"] as? Int64, 1_000_000)
+        XCTAssertEqual(try decode(#"{"type":"clock_probe","payload":{"id":7,"sentAt":1000000}}"#), probe)
+
+        let reply = ControlMessage.clockReply(ClockReply(id: 7, sentAt: 1_000_000, receivedAt: 5_000_000, repliedAt: 5_000_020))
+        XCTAssertEqual(try decode(#"{"type":"clock_reply","payload":{"id":7,"sentAt":1000000,"receivedAt":5000000,"repliedAt":5000020}}"#), reply)
+        XCTAssertThrowsError(try decode(#"{"type":"clock_reply","payload":{"id":7}}"#), "a reply without times is not a reply")
     }
 
     func testMediaKeyOptionalFieldsAreOmittedWhenNil() throws {
