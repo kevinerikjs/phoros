@@ -34,16 +34,42 @@ public struct SendPolicy: Equatable, Sendable {
     /// pipeline full while audio still goes first.
     public var maximumConcurrentWrites: Int
 
+    /// A delta frame still waiting in the queue this long after it was
+    /// enqueued is dropped instead of sent: on a link slower than the
+    /// encoder every queued frame is delivered late, and a newer one is
+    /// worth more than an old one delivered in full. The host then asks the
+    /// encoder for a keyframe (`needsKeyframe`) so the decoder recovers at
+    /// once instead of showing broken references until the next periodic one.
+    public var maximumVideoQueueAge: TimeInterval
+
+    /// How long the video already handed to the transport may take to drain,
+    /// at the rate the link was last seen to drain it. `maximumQueuedBytes` is
+    /// the same idea for a link whose rate is not known yet: 192 KB is 25 ms
+    /// on a fast LAN but 150 ms on a 10 Mbps link, and every frame waits
+    /// behind it. Once the scheduler has measured the drain rate the budget
+    /// is the smaller of the two. Zero disables the time budget.
+    public var maximumQueueDelay: TimeInterval
+
+    /// Floor for the time budget in bytes, so a momentarily slow link cannot
+    /// shrink the budget below one typical frame and starve the stream.
+    public var minimumQueuedBytes: Int
+
     public init(
         maximumQueuedBytes: Int = 192 * 1024,
         maximumQueuedAudioBytes: Int = 64 * 1024,
         maximumAudioSilence: TimeInterval = 1.0,
-        maximumConcurrentWrites: Int = 8
+        maximumConcurrentWrites: Int = 8,
+        maximumVideoQueueAge: TimeInterval = 0.1,
+        maximumQueueDelay: TimeInterval = 0.03,
+        minimumQueuedBytes: Int = 24 * 1024
     ) {
         self.maximumQueuedBytes = maximumQueuedBytes
         self.maximumQueuedAudioBytes = maximumQueuedAudioBytes
         self.maximumAudioSilence = maximumAudioSilence
         self.maximumConcurrentWrites = maximumConcurrentWrites
+        self.maximumVideoQueueAge = maximumVideoQueueAge
+        self.maximumQueueDelay = maximumQueueDelay
+        self.minimumQueuedBytes = minimumQueuedBytes
     }
 
     /// Defaults for a client that decodes only PCM: audio is 2.8 Mbps instead
@@ -63,9 +89,12 @@ public struct SendPolicy: Equatable, Sendable {
 /// Usage, from one queue:
 ///
 /// ```swift
-/// // Producer side
-/// if scheduler.admitVideo(isKeyframe: key, now: now) {
-///     scheduler.enqueue(frame, lane: .video)
+/// // Capture side: skip the frame before it costs an encode. The encoder
+/// // never saw it, so the reference chain stays whole.
+/// if scheduler.shouldEncodeVideo() { encoder.encode(captured) }
+/// // Encoder output
+/// if scheduler.admitVideo(isKeyframe: key) {
+///     scheduler.enqueueVideoFrame(packets, isKeyframe: key)
 /// }
 /// // Drain
 /// while let write = scheduler.dequeue() {
@@ -80,18 +109,37 @@ public struct SendScheduler: Sendable {
     public struct Write: Equatable, Sendable {
         public let data: Data
         public let lane: SendLane
+        /// The caller's identifier for a video frame (`enqueueVideoFrame(tag:)`),
+        /// zero for anything else. For tracing, the scheduler does not read it.
+        public let tag: Int
 
-        public init(data: Data, lane: SendLane) {
+        public init(data: Data, lane: SendLane, tag: Int = 0) {
             self.data = data
             self.lane = lane
+            self.tag = tag
         }
     }
 
     public var policy: SendPolicy
 
+    /// One video frame in the queue: its packets, already framed, and when it
+    /// arrived. Sent as one write so the transport sees whole frames.
+    private struct QueuedFrame {
+        var data: Data
+        var isKeyframe: Bool
+        var enqueuedAt: Date
+        var tag: Int
+    }
+
     private var control: [Data] = []
     private var audio: [Data] = []
-    private var video: [Data] = []
+    private var video: [QueuedFrame] = []
+    private var queuedVideoBytes = 0
+
+    /// Set when the scheduler dropped a delta frame the peer will now be
+    /// missing. Read it after draining and ask the encoder for a keyframe;
+    /// it clears itself once a keyframe is enqueued.
+    public private(set) var needsKeyframe = false
 
     private var bytesInFlight = 0
     private var audioBytesInFlight = 0
@@ -100,6 +148,24 @@ public struct SendScheduler: Sendable {
 
     public private(set) var droppedVideoFrames = 0
     public private(set) var droppedAudioChunks = 0
+    /// Captured frames `shouldEncodeVideo` refused. Cheap drops: no encode, no
+    /// broken reference.
+    public private(set) var skippedCaptureFrames = 0
+
+    /// Bytes per second the transport drained while it had a backlog, as an
+    /// exponential average over completions. Zero until measured. A transport
+    /// that can measure the link better (from its socket buffer, say) sets it
+    /// through `reportDrainRate`.
+    public private(set) var drainRate: Double = 0
+
+    /// Bytes the transport still holds below the scheduler: a kernel socket
+    /// buffer, for one. A write completes when the kernel accepts it, not when
+    /// the peer has it, and that buffer can grow to megabytes on a slow link.
+    /// Counted toward the video budget like the scheduler's own backlog. The
+    /// transport reports it; zero when it cannot.
+    public var transportBacklog = 0
+    private var drainWindowStart: Date?
+    private var drainWindowBytes = 0
 
     public init(policy: SendPolicy = SendPolicy()) {
         self.policy = policy
@@ -111,15 +177,66 @@ public struct SendScheduler: Sendable {
     /// Frames queued and not yet handed to the transport.
     public var queuedCount: Int { control.count + audio.count + video.count }
 
+    /// Video bytes queued and not yet handed to the transport.
+    public var queuedVideo: (bytes: Int, frames: Int) { (queuedVideoBytes, video.count) }
+
+    /// Age of the oldest queued video frame, or zero when none is queued.
+    public func oldestQueuedVideoAge(now: Date = Date()) -> TimeInterval {
+        video.first.map { now.timeIntervalSince($0.enqueuedAt) } ?? 0
+    }
+
     // MARK: Admission
 
     /// Whether a video frame should be sent now. Keyframes are always admitted:
     /// dropping one strands the decoder until the next, which is a worse
     /// artefact than a skipped delta frame.
     public mutating func admitVideo(isKeyframe: Bool) -> Bool {
-        if isKeyframe || bytesInFlight <= policy.maximumQueuedBytes { return true }
+        if isKeyframe { return true }
+        if needsKeyframe {
+            // The peer cannot decode a delta until the keyframe arrives. Sending
+            // it would only delay that keyframe.
+            droppedVideoFrames += 1
+            return false
+        }
+        if videoBytesPending <= videoByteBudget { return true }
         droppedVideoFrames += 1
+        needsKeyframe = true
         return false
+    }
+
+    /// Video bytes between the encoder and the peer as far as the scheduler
+    /// can see: queued here, handed to the transport, and held by it.
+    public var videoBytesPending: Int { bytesInFlight + queuedVideoBytes + transportBacklog }
+
+    /// A link rate measured outside the scheduler replaces its own estimate.
+    public mutating func reportDrainRate(_ bytesPerSecond: Double) {
+        guard bytesPerSecond > 0 else { return }
+        drainRate = bytesPerSecond
+    }
+
+    /// Whether a captured frame is worth encoding now. False while the
+    /// transport is behind: a frame skipped here costs nothing, while a frame
+    /// dropped after encoding breaks the reference chain and forces a keyframe
+    /// that is larger than everything it replaced. Gate captures with this and
+    /// `admitVideo` becomes the exception path.
+    public func shouldEncodeVideo() -> Bool {
+        videoBytesPending <= videoByteBudget
+    }
+
+    /// `shouldEncodeVideo` with the skip counted.
+    public mutating func admitCapture() -> Bool {
+        if shouldEncodeVideo() { return true }
+        skippedCaptureFrames += 1
+        return false
+    }
+
+    /// Bytes of video the transport may hold before the scheduler sheds:
+    /// `maximumQueuedBytes`, or less once the drain rate says that many bytes
+    /// would take longer than `maximumQueueDelay` to send.
+    public var videoByteBudget: Int {
+        guard policy.maximumQueueDelay > 0, drainRate > 0 else { return policy.maximumQueuedBytes }
+        let timed = Int(drainRate * policy.maximumQueueDelay)
+        return min(policy.maximumQueuedBytes, max(policy.minimumQueuedBytes, timed))
     }
 
     /// Whether an audio chunk should be sent now.
@@ -139,35 +256,73 @@ public struct SendScheduler: Sendable {
         switch lane {
         case .control: control.append(data)
         case .audio: audio.append(data)
-        case .video: video.append(data)
+        case .video: enqueueVideoFrame([data], isKeyframe: true)   // legacy path: never age-dropped
         }
+    }
+
+    /// Queue one video frame as its already-framed packets. They go to the
+    /// transport as one write, in order, so a frame is either wholly queued,
+    /// wholly in flight or wholly dropped.
+    public mutating func enqueueVideoFrame(_ packets: [Data], isKeyframe: Bool, now: Date = Date(), tag: Int = 0) {
+        var data = Data()
+        for packet in packets { data.append(packet) }
+        video.append(QueuedFrame(data: data, isKeyframe: isKeyframe, enqueuedAt: now, tag: tag))
+        queuedVideoBytes += data.count
+        if isKeyframe { needsKeyframe = false }
     }
 
     /// The next buffer to write, or `nil` when the queue is empty or the
     /// concurrent-write window is full. Control first, then audio, then video.
-    public mutating func dequeue() -> Write? {
+    public mutating func dequeue(now: Date = Date()) -> Write? {
         guard writesInFlight < policy.maximumConcurrentWrites else { return nil }
+        shedStaleVideo(now: now)
         let write: Write
         if !control.isEmpty {
             write = Write(data: control.removeFirst(), lane: .control)
         } else if !audio.isEmpty {
             write = Write(data: audio.removeFirst(), lane: .audio)
         } else if !video.isEmpty {
-            write = Write(data: video.removeFirst(), lane: .video)
+            // Hold video while the transport already holds a budget's worth:
+            // a frame parked here can still be shed by age, a frame in the
+            // socket buffer cannot. Keyframes go regardless, the peer is
+            // waiting on them.
+            if let first = video.first, !first.isKeyframe, bytesInFlight + transportBacklog > videoByteBudget { return nil }
+            let frame = video.removeFirst()
+            queuedVideoBytes -= frame.data.count
+            write = Write(data: frame.data, lane: .video, tag: frame.tag)
         } else {
             return nil
         }
         writesInFlight += 1
         bytesInFlight += write.data.count
         if write.lane == .audio { audioBytesInFlight += write.data.count }
+        if drainWindowStart == nil { drainWindowStart = now }
         return write
     }
 
     /// The transport finished (or failed) a write handed out by `dequeue`.
-    public mutating func completed(_ write: Write) {
+    public mutating func completed(_ write: Write, now: Date = Date()) {
         writesInFlight -= 1
         bytesInFlight -= write.data.count
         if write.lane == .audio { audioBytesInFlight -= write.data.count }
+        drainWindowBytes += write.data.count
+        // A window that starts at a write and ends at a completion, with the
+        // transport never idle inside it, measures the link and not the
+        // producer. Sample once the window is long enough to mean something,
+        // and whenever the backlog empties.
+        if let start = drainWindowStart {
+            let elapsed = now.timeIntervalSince(start)
+            let idle = writesInFlight <= 0
+            if drainWindowBytes >= 16 * 1024, elapsed >= (idle ? 0.005 : 0.05) {
+                let sample = Double(drainWindowBytes) / elapsed
+                drainRate = drainRate == 0 ? sample : drainRate * 0.7 + sample * 0.3
+                drainWindowStart = idle ? nil : now
+                drainWindowBytes = 0
+            } else if idle {
+                drainWindowStart = nil
+                drainWindowBytes = 0
+            }
+        }
         if writesInFlight <= 0 {
             // Nothing outstanding: any drift from a lost completion is erased
             // here, so the counters can never latch above a threshold.
@@ -181,5 +336,18 @@ public struct SendScheduler: Sendable {
     /// queued is stale by the time it resumes.
     public mutating func dropQueuedVideo() {
         video.removeAll()
+        queuedVideoBytes = 0
+    }
+
+    /// Drop delta frames that waited longer than `maximumVideoQueueAge`.
+    /// Keyframes stay: the decoder needs the next one whatever its age.
+    private mutating func shedStaleVideo(now: Date) {
+        while let first = video.first, !first.isKeyframe,
+              now.timeIntervalSince(first.enqueuedAt) > policy.maximumVideoQueueAge {
+            video.removeFirst()
+            queuedVideoBytes -= first.data.count
+            droppedVideoFrames += 1
+            needsKeyframe = true
+        }
     }
 }

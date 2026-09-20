@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.4.0
+
+Protocol version stays 1. Additive.
+
+- `Phoros`: `PairingMessage.maximumFrameRate` (auth_request), the highest frame rate the client wants; `PeerCapabilities.videoFrameRate(preset:hostRefreshRate:)` raises a 60 fps preset toward it. `PairingMessage.supportsClockSync` (auth_success). `ControlMessage.clockProbe` and `.clockReply` with `ClockProbe` and `ClockReply`.
+- `PhorosSession`: `BitrateController` sets the video bitrate from the round trip of a control ping on the media connection, the one signal that sees the sender's socket buffer and the access point. `ClockSync` estimates the host's clock offset from probe replies so a client can read a frame's timestamp as an age. `SendScheduler`: `admitCapture` and `shouldEncodeVideo` refuse a frame before it is encoded, `enqueueVideoFrame` sends a frame as one write, queued bytes and `transportBacklog` count toward the budget, `maximumQueueDelay` shrinks the budget to a measured `drainRate`, delta frames are refused while a keyframe is owed and shed by `maximumVideoQueueAge`, `needsKeyframe` asks for recovery. `ControllerSampler` is event driven: `GCController` value changes are sent as they happen, rate limited to `sampleRate`, with a keepalive. `ClientCapabilities.maximumFrameRate`, `HostCapabilities.supportsClockSync`.
+- `PhorosSession`: `PhorosRealtimeTransport`, the seam between an application and the wire, with `RealtimeInbound`, `RealtimeMetrics` and `RealtimeTrace`.
+- `PhorosNetwork`: `PhorosLegacyTransport`, the v1 TCP wire behind the seam (framing, fragmentation, reassembly, scheduling, shedding, link probe, bitrate control, heartbeats, keep-awake), and `PhorosConnection.parameters()`, the tuned TCP parameters (no delay, interactive video service class) both ends use. `PhorosNetwork` now depends on `PhorosSession`.
+- `PhorosMedia`: `VideoEncoderConfiguration.LatencyTuning` (`lowLatencyRateControl`, `maxFrameDelayCount`, `prioritizeSpeed`, `h264Profile`, `burstMultiplier`), `VideoEncoder.setBitrate` for a live change without a restart, `onFrameDropped` and `droppedFrames`, `keyframeInterval` on the configuration.
+- Measured on the reference host and its latency harness at 1080p60: button to decoded frame 47/57 ms (p50/p95) before the release, 27.5/32.9 after it at 60 fps, 19.1/25.0 with a 120 fps client; a 12 Mbps link that carried 16 Mbps of content went from 477/1077 ms to 44/62.
+- 123 tests.
+
 ## 1.3.0
 
 Protocol version stays 1. Additive.

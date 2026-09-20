@@ -173,6 +173,8 @@ JSON object. `type` is required. Every other key is optional and omitted when no
 | `supportedAudioCodecs` | [string] | hello, auth_request | codec names the client decodes, preferred first |
 | `supportedVideoCodecs` | [string] | hello, auth_request | codec names the client decodes, preferred first |
 | `wantsAudio` | bool | auth_request | absent means `true` |
+| `maximumFrameRate` | number | auth_request | the highest video frame rate the client wants, normally its display's refresh rate. A host raises a 60 fps preset toward the lower of this and its own display. Absent means the preset's rate. Added in package 1.4.0 |
+| `supportsClockSync` | bool | auth_success | host answers `clock_probe` with `clock_reply`. Added in package 1.4.0 |
 
 Codec lists are strings, not enums. An unknown future codec then cannot fail decoding of the message that carries the credentials. Receivers ignore unknown names.
 
@@ -211,8 +213,14 @@ JSON object with `type` and, for some types, `payload`. The client sends it bare
 | `window_select_request` | client → host | `{"windowID": id}`, `0` for full display |
 | `capture_mode_changed` | host → client | `{"windowMode", "windowID"?, "title"?, "app"?}` |
 | `media_key` | client → host | see below |
+| `clock_probe` | client → host | `{"id", "sentAt"}`. Only if host `supportsClockSync`. Added in package 1.4.0 |
+| `clock_reply` | host → client | `{"id", "sentAt", "receivedAt", "repliedAt"}`. Added in package 1.4.0 |
 
 Preset names: `auto`, `360p30`, `480p30`, `720p30`, `720p60`, `1080p30`, `1080p60`.
+
+### clock_probe and clock_reply
+
+One exchange samples the offset between the two clocks, as in NTP. `sentAt` is the client's clock when the probe left. The host echoes `id` and `sentAt`, adds `receivedAt` (its clock when the probe arrived) and `repliedAt` (its clock when the reply left). All four are microseconds of each peer's monotonic clock, the clock video presentation timestamps use, so the client can read a frame's timestamp as an age. `PhorosSession.ClockSync` does the arithmetic and keeps the sample with the shortest round trip.
 
 ### media_key
 

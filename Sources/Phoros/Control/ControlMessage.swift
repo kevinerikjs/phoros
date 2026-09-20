@@ -20,6 +20,14 @@ public enum ControlMessage: Equatable, Sendable {
     /// Either direction. Reply to `.ping`.
     case pong
 
+    /// Client to host. Ask for the host's clock. Send only to a host whose
+    /// `PeerCapabilities.supportsClockSync` is true.
+    case clockProbe(ClockProbe)
+
+    /// Host to client. Reply to `.clockProbe`, with the probe's fields echoed
+    /// and the host's receive and send times added.
+    case clockReply(ClockReply)
+
     /// Client to host. Start sending media.
     case streamRequest
 
@@ -241,6 +249,39 @@ public struct Click: Codable, Equatable, Sendable {
     }
 }
 
+/// A clock probe: one sample for estimating the offset between two peers'
+/// clocks, as in NTP. Times are microseconds of each peer's own monotonic
+/// clock, the same clock as video presentation timestamps.
+public struct ClockProbe: Codable, Equatable, Sendable {
+    /// Matches a reply to its probe.
+    public var id: UInt32
+    /// The client's clock when it sent the probe.
+    public var sentAt: Int64
+
+    public init(id: UInt32, sentAt: Int64) {
+        self.id = id
+        self.sentAt = sentAt
+    }
+}
+
+/// The host's answer to a `ClockProbe`.
+public struct ClockReply: Codable, Equatable, Sendable {
+    public var id: UInt32
+    /// `ClockProbe.sentAt`, echoed.
+    public var sentAt: Int64
+    /// The host's clock when the probe arrived.
+    public var receivedAt: Int64
+    /// The host's clock when the reply left.
+    public var repliedAt: Int64
+
+    public init(id: UInt32, sentAt: Int64, receivedAt: Int64, repliedAt: Int64) {
+        self.id = id
+        self.sentAt = sentAt
+        self.receivedAt = receivedAt
+        self.repliedAt = repliedAt
+    }
+}
+
 // MARK: - Codable
 
 extension ControlMessage {
@@ -264,6 +305,8 @@ extension ControlMessage {
         case windowSelectRequest = "window_select_request"
         case captureModeChanged = "capture_mode_changed"
         case mediaKey = "media_key"
+        case clockProbe = "clock_probe"
+        case clockReply = "clock_reply"
     }
 
     public var kind: Kind {
@@ -285,6 +328,8 @@ extension ControlMessage {
         case .windowSelectRequest: return .windowSelectRequest
         case .captureModeChanged: return .captureModeChanged
         case .mediaKey: return .mediaKey
+        case .clockProbe: return .clockProbe
+        case .clockReply: return .clockReply
         }
     }
 }
@@ -331,6 +376,8 @@ extension ControlMessage: Codable {
         case .windowSelectRequest: self = .windowSelectRequest(windowID: try payload(WindowIDValue.self).windowID)
         case .captureModeChanged: self = .captureModeChanged(try payload(CaptureMode.self))
         case .mediaKey: self = .mediaKey(try payload(MediaKeyCommand.self))
+        case .clockProbe: self = .clockProbe(try payload(ClockProbe.self))
+        case .clockReply: self = .clockReply(try payload(ClockReply.self))
         }
     }
 
@@ -357,6 +404,10 @@ extension ControlMessage: Codable {
             try container.encode(WindowIDValue(windowID: windowID), forKey: .payload)
         case .captureModeChanged(let mode):
             try container.encode(mode, forKey: .payload)
+        case .clockProbe(let probe):
+            try container.encode(probe, forKey: .payload)
+        case .clockReply(let reply):
+            try container.encode(reply, forKey: .payload)
         case .mediaKey(let command):
             try container.encode(command, forKey: .payload)
         }

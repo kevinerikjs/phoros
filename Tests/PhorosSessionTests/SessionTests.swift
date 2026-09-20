@@ -115,6 +115,8 @@ final class SendSchedulerTests: XCTestCase {
         XCTAssertTrue(scheduler.admitVideo(isKeyframe: true))
         XCTAssertEqual(scheduler.droppedVideoFrames, 1)
         scheduler.completed(write)
+        XCTAssertFalse(scheduler.admitVideo(isKeyframe: false), "a keyframe is owed first")
+        scheduler.enqueueVideoFrame([Data(count: 1)], isKeyframe: true)
         XCTAssertTrue(scheduler.admitVideo(isKeyframe: false))
     }
 
@@ -153,6 +155,202 @@ final class SendSchedulerTests: XCTestCase {
         scheduler.dropQueuedVideo()
         XCTAssertEqual(scheduler.queuedCount, 1)
         XCTAssertEqual(scheduler.dequeue()?.lane, .audio)
+    }
+}
+
+final class SendSchedulerQueueAgeTests: XCTestCase {
+    func testQueuedVideoCountsTowardAdmission() {
+        var scheduler = SendScheduler(policy: SendPolicy(maximumQueuedBytes: 10_000))
+        scheduler.enqueueVideoFrame([Data(count: 6_000)], isKeyframe: false)
+        scheduler.enqueueVideoFrame([Data(count: 6_000)], isKeyframe: false)
+        XCTAssertEqual(scheduler.queuedVideo.bytes, 12_000)
+        XCTAssertFalse(scheduler.admitVideo(isKeyframe: false), "queued bytes alone exceed the budget")
+        XCTAssertTrue(scheduler.needsKeyframe)
+        XCTAssertTrue(scheduler.admitVideo(isKeyframe: true), "keyframes are always admitted")
+    }
+
+    func testStaleDeltaFramesAreShedAndKeyframesKept() {
+        var scheduler = SendScheduler(policy: SendPolicy(maximumVideoQueueAge: 0.1))
+        let t0 = Date()
+        scheduler.enqueueVideoFrame([Data([1])], isKeyframe: true, now: t0)
+        scheduler.enqueueVideoFrame([Data([2])], isKeyframe: false, now: t0)
+        scheduler.enqueueVideoFrame([Data([3]), Data([4])], isKeyframe: false, now: t0.addingTimeInterval(0.15))
+        XCTAssertEqual(scheduler.dequeue(now: t0.addingTimeInterval(0.2))?.data, Data([1]), "the old keyframe still goes")
+        XCTAssertEqual(scheduler.dequeue(now: t0.addingTimeInterval(0.2))?.data, Data([3, 4]), "the stale delta was shed, the fresh one goes as one write")
+        XCTAssertEqual(scheduler.droppedVideoFrames, 1)
+        XCTAssertTrue(scheduler.needsKeyframe)
+        scheduler.enqueueVideoFrame([Data([5])], isKeyframe: true)
+        XCTAssertFalse(scheduler.needsKeyframe, "a queued keyframe clears the request")
+    }
+
+    func testWholeFrameIsOneWrite() {
+        var scheduler = SendScheduler()
+        scheduler.enqueueVideoFrame([Data([1, 2]), Data([3])], isKeyframe: false)
+        let write = scheduler.dequeue()
+        XCTAssertEqual(write?.data, Data([1, 2, 3]))
+        XCTAssertEqual(scheduler.queuedVideo.bytes, 0)
+        XCTAssertEqual(scheduler.backlog.total, 3)
+        scheduler.completed(write!)
+        XCTAssertEqual(scheduler.backlog.total, 0)
+    }
+}
+
+final class SendSchedulerGateTests: XCTestCase {
+    func testCaptureGateRefusesWhileBacklogged() {
+        var scheduler = SendScheduler(policy: SendPolicy(maximumQueuedBytes: 10_000))
+        XCTAssertTrue(scheduler.shouldEncodeVideo())
+        scheduler.enqueueVideoFrame([Data(count: 12_000)], isKeyframe: false)
+        XCTAssertFalse(scheduler.admitCapture(), "the transport is behind: skip before encoding")
+        XCTAssertEqual(scheduler.skippedCaptureFrames, 1)
+        XCTAssertFalse(scheduler.needsKeyframe, "a skipped capture breaks no reference chain")
+        let write = scheduler.dequeue()!
+        scheduler.completed(write)
+        XCTAssertTrue(scheduler.admitCapture())
+    }
+
+    func testDeltasAreRefusedUntilTheKeyframeArrives() {
+        var scheduler = SendScheduler(policy: SendPolicy(maximumQueuedBytes: 10))
+        scheduler.enqueueVideoFrame([Data(count: 20)], isKeyframe: false)
+        XCTAssertFalse(scheduler.admitVideo(isKeyframe: false))
+        XCTAssertTrue(scheduler.needsKeyframe)
+        let write = scheduler.dequeue()!
+        scheduler.completed(write)
+        XCTAssertFalse(scheduler.admitVideo(isKeyframe: false), "the peer cannot decode a delta until the keyframe")
+        XCTAssertTrue(scheduler.admitVideo(isKeyframe: true))
+        scheduler.enqueueVideoFrame([Data(count: 1)], isKeyframe: true)
+        XCTAssertTrue(scheduler.admitVideo(isKeyframe: false))
+    }
+
+    func testDrainRateShrinksTheByteBudget() {
+        var scheduler = SendScheduler(policy: SendPolicy(maximumQueuedBytes: 192 * 1024, maximumQueueDelay: 0.03, minimumQueuedBytes: 1_000))
+        XCTAssertEqual(scheduler.videoByteBudget, 192 * 1024, "unknown link: the byte cap applies")
+        let t0 = Date()
+        // 40 KB takes 40 ms to complete: a 1 MB/s link.
+        scheduler.enqueueVideoFrame([Data(count: 40_000)], isKeyframe: false, now: t0)
+        let write = scheduler.dequeue(now: t0)!
+        scheduler.completed(write, now: t0.addingTimeInterval(0.04))
+        XCTAssertEqual(scheduler.drainRate, 1_000_000, accuracy: 1)
+        XCTAssertEqual(scheduler.videoByteBudget, 30_000, "30 ms of a 1 MB/s link")
+    }
+}
+
+final class SendSchedulerTransportBacklogTests: XCTestCase {
+    func testTransportBacklogCountsTowardTheBudgetAndHoldsDeltas() {
+        var scheduler = SendScheduler(policy: SendPolicy(maximumQueuedBytes: 10_000))
+        scheduler.transportBacklog = 12_000
+        XCTAssertFalse(scheduler.shouldEncodeVideo(), "the kernel already holds more than the budget")
+        scheduler.enqueueVideoFrame([Data(count: 100)], isKeyframe: false)
+        XCTAssertNil(scheduler.dequeue(), "a delta waits while the transport is full")
+        XCTAssertEqual(scheduler.queuedVideo.frames, 1)
+        scheduler.enqueueVideoFrame([Data(count: 100)], isKeyframe: true)
+        scheduler.dropQueuedVideo()
+        scheduler.enqueueVideoFrame([Data(count: 100)], isKeyframe: true)
+        XCTAssertNotNil(scheduler.dequeue(), "a keyframe goes regardless")
+        scheduler.transportBacklog = 0
+        scheduler.enqueueVideoFrame([Data(count: 100)], isKeyframe: false)
+        XCTAssertNotNil(scheduler.dequeue())
+    }
+
+    func testReportedDrainRateReplacesTheEstimate() {
+        var scheduler = SendScheduler(policy: SendPolicy(maximumQueuedBytes: 192 * 1024, maximumQueueDelay: 0.03, minimumQueuedBytes: 1_000))
+        scheduler.reportDrainRate(500_000)
+        XCTAssertEqual(scheduler.videoByteBudget, 15_000)
+        scheduler.reportDrainRate(0)
+        XCTAssertEqual(scheduler.drainRate, 500_000, "zero is not a measurement")
+    }
+}
+
+final class ClockSyncTests: XCTestCase {
+    func testOffsetComesFromTheShortestRoundTrip() {
+        var sync = ClockSync()
+        XCTAssertNil(sync.offset)
+        // Host clock runs 5 s ahead. First exchange: 2 ms each way.
+        let p1 = sync.probe(now: 1_000_000)
+        XCTAssertEqual(sync.reply(ClockReply(id: p1.id, sentAt: p1.sentAt, receivedAt: 6_002_000, repliedAt: 6_002_100), now: 1_004_100), 4_000)
+        XCTAssertEqual(sync.offset, 5_000_000)
+        // Second exchange: 40 ms queued on the way there. Worse sample, ignored for the offset.
+        let p2 = sync.probe(now: 2_000_000)
+        XCTAssertEqual(sync.reply(ClockReply(id: p2.id, sentAt: p2.sentAt, receivedAt: 7_042_000, repliedAt: 7_042_100), now: 2_044_100), 44_000)
+        XCTAssertEqual(sync.offset, 5_000_000)
+        XCTAssertEqual(sync.bestRoundTrip, 4_000)
+        XCTAssertEqual(sync.lastRoundTrip, 44_000)
+        XCTAssertEqual(sync.age(ofPresentationTimestamp: 7_000_000, now: 2_030_000), 30_000, "a frame captured 30 ms ago")
+    }
+
+    func testReplyToUnknownProbeIsIgnored() {
+        var sync = ClockSync()
+        XCTAssertNil(sync.reply(ClockReply(id: 99, sentAt: 1, receivedAt: 2, repliedAt: 3), now: 4))
+        let p = sync.probe(now: 10)
+        XCTAssertNil(sync.reply(ClockReply(id: p.id, sentAt: 11, receivedAt: 2, repliedAt: 3), now: 4), "sentAt must echo")
+        XCTAssertNil(sync.offset)
+    }
+}
+
+final class BitrateControllerTests: XCTestCase {
+    func testQueueingDelayStepsDownAndClearLinkStepsUp() {
+        var controller = BitrateController(maximum: 10_000_000, policy: BitrateControllerPolicy(initialBitrate: 0))
+        let t0 = Date()
+        controller.observe(roundTrip: 0.002, now: t0)
+        XCTAssertNil(controller.evaluate(now: t0), "a floor sample alone changes nothing")
+        controller.observe(roundTrip: 0.040, now: t0.addingTimeInterval(0.2))
+        XCTAssertEqual(controller.queueDelay, 0.038, accuracy: 0.0001)
+        XCTAssertNil(controller.evaluate(now: t0.addingTimeInterval(0.2)), "one sample is a spike")
+        controller.observe(roundTrip: 0.040, now: t0.addingTimeInterval(0.4))
+        XCTAssertEqual(controller.evaluate(now: t0.addingTimeInterval(0.4)), 7_000_000, "two are a queue")
+        controller.observe(roundTrip: 0.040, now: t0.addingTimeInterval(0.5))
+        XCTAssertNil(controller.evaluate(now: t0.addingTimeInterval(0.5)), "too soon for a second decrease")
+        controller.observe(roundTrip: 0.030, now: t0.addingTimeInterval(0.8))
+        XCTAssertNil(controller.evaluate(now: t0.addingTimeInterval(0.8)), "still queued but draining: the first cut is working")
+        controller.observe(roundTrip: 0.040, now: t0.addingTimeInterval(1.1))
+        XCTAssertEqual(controller.evaluate(now: t0.addingTimeInterval(1.1)), 4_900_000, "growing again: cut again")
+        // The link clears. One increase after the clear interval, not before.
+        for i in 0..<12 {
+            controller.observe(roundTrip: 0.003, now: t0.addingTimeInterval(1.2 + Double(i) * 0.2))
+            let result = controller.evaluate(now: t0.addingTimeInterval(1.2 + Double(i) * 0.2))
+            if Double(i) * 0.2 < 2 { XCTAssertNil(result, "step \(i)") } else { XCTAssertEqual(result, 5_635_000); break }
+        }
+    }
+
+    func testSlowStartClimbsFastUntilTheFirstCongestion() {
+        var controller = BitrateController(maximum: 10_000_000)
+        XCTAssertEqual(controller.current, 4_000_000, "a new link starts below the ceiling")
+        let t0 = Date()
+        controller.observe(roundTrip: 0.003, now: t0)
+        controller.observe(roundTrip: 0.003, now: t0.addingTimeInterval(0.7))
+        XCTAssertEqual(controller.evaluate(now: t0.addingTimeInterval(0.7)), 6_000_000, "slow start: 1.5x every 0.6 s")
+        controller.observe(roundTrip: 0.200, now: t0.addingTimeInterval(0.9))
+        XCTAssertNil(controller.evaluate(now: t0.addingTimeInterval(0.9)))
+        controller.observe(roundTrip: 0.200, now: t0.addingTimeInterval(1.0))
+        XCTAssertEqual(controller.evaluate(now: t0.addingTimeInterval(1.0)), 3_000_000, "a severe queue halves the rate")
+        controller.observe(roundTrip: 0.003, now: t0.addingTimeInterval(1.2))
+        controller.observe(roundTrip: 0.003, now: t0.addingTimeInterval(2.0))
+        XCTAssertNil(controller.evaluate(now: t0.addingTimeInterval(2.0)), "after congestion the climb is the slow one")
+    }
+
+    func testDelayWithoutBacklogIsTheLinkNotAQueue() {
+        var controller = BitrateController(maximum: 10_000_000, policy: BitrateControllerPolicy(initialBitrate: 0))
+        let t0 = Date()
+        controller.observe(roundTrip: 0.006, transportBacklog: 0, now: t0)
+        for i in 1...6 {
+            controller.observe(roundTrip: 0.080, transportBacklog: 0, now: t0.addingTimeInterval(Double(i) * 0.2))
+            XCTAssertNil(controller.evaluate(now: t0.addingTimeInterval(Double(i) * 0.2)), "a sleeping radio is not congestion")
+        }
+        controller.observe(roundTrip: 0.080, transportBacklog: 40_000, now: t0.addingTimeInterval(1.4))
+        controller.observe(roundTrip: 0.080, transportBacklog: 40_000, now: t0.addingTimeInterval(1.6))
+        XCTAssertEqual(controller.evaluate(now: t0.addingTimeInterval(1.6)), 7_000_000, "bytes waiting on our side: a queue")
+    }
+
+    func testNeverBelowMinimumOrAboveMaximum() {
+        var controller = BitrateController(maximum: 2_000_000, policy: BitrateControllerPolicy(minimumBitrate: 1_500_000))
+        let t0 = Date()
+        controller.observe(roundTrip: 0.001, now: t0)
+        controller.observe(roundTrip: 0.100, now: t0.addingTimeInterval(0.2))
+        controller.observe(roundTrip: 0.100, now: t0.addingTimeInterval(0.4))
+        XCTAssertEqual(controller.evaluate(now: t0.addingTimeInterval(0.4)), 1_500_000)
+        controller.observe(roundTrip: 0.100, now: t0.addingTimeInterval(0.6))
+        XCTAssertNil(controller.evaluate(now: t0.addingTimeInterval(0.6)), "already at the floor")
+        controller.setMaximum(1_200_000)
+        XCTAssertEqual(controller.current, 1_200_000, "the ceiling pulls the rate down with it")
     }
 }
 

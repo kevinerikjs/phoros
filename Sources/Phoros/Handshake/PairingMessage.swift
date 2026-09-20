@@ -131,6 +131,11 @@ public struct PairingMessage: Codable, Equatable, Sendable {
     /// `.pairSuccess` and `.authSuccess`.
     public var supportsControllerInput: Bool?
 
+    /// `true` from hosts that answer `ControlMessage.clockProbe` with
+    /// `.clockReply`. Absent means the host drops probes, so the client has
+    /// no clock offset and no frame age. Sent on `.authSuccess`.
+    public var supportsClockSync: Bool?
+
     // MARK: Client capabilities and preferences (client to host)
 
     /// The client's native audio hardware rate, so the host can encode to it
@@ -149,6 +154,13 @@ public struct PairingMessage: Codable, Equatable, Sendable {
     /// Whether the client wants audio packets at all for this session.
     /// Absent means yes.
     public var wantsAudio: Bool?
+
+    /// The highest video frame rate the client wants, normally its display's
+    /// refresh rate. A host captures and encodes at the lower of this and
+    /// its own display, when the preset allows more than 30 fps. Absent
+    /// means the preset's own rate, which is what every client got before
+    /// this field existed. Sent on `.authRequest`.
+    public var maximumFrameRate: Double?
 
     public init(
         type: PairingMessageType,
@@ -169,7 +181,9 @@ public struct PairingMessage: Codable, Equatable, Sendable {
         preferredAudioSampleRate: Double? = nil,
         supportedAudioCodecs: [String]? = nil,
         supportedVideoCodecs: [String]? = nil,
-        wantsAudio: Bool? = nil
+        wantsAudio: Bool? = nil,
+        supportsClockSync: Bool? = nil,
+        maximumFrameRate: Double? = nil
     ) {
         self.type = type
         self.deviceName = deviceName
@@ -190,6 +204,8 @@ public struct PairingMessage: Codable, Equatable, Sendable {
         self.supportedAudioCodecs = supportedAudioCodecs
         self.supportedVideoCodecs = supportedVideoCodecs
         self.wantsAudio = wantsAudio
+        self.supportsClockSync = supportsClockSync
+        self.maximumFrameRate = maximumFrameRate
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -201,6 +217,7 @@ public struct PairingMessage: Codable, Equatable, Sendable {
         case controls = "phoneControls"
         case supportsControllerInput
         case preferredAudioSampleRate, supportedAudioCodecs, supportedVideoCodecs, wantsAudio
+        case supportsClockSync, maximumFrameRate
     }
 }
 

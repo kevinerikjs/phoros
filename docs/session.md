@@ -99,6 +99,52 @@ case .rejected(let reply):
 
 Pass `audioPreferences: [.pcmFloat32]` to force PCM for a session, for example from a "safe mode" default.
 
+## The transport seam
+
+Since 1.4.0 an application does not have to assemble the pieces below by hand. `PhorosRealtimeTransport` (in `PhorosSession`) is the seam between an application and the wire: it sends and receives the units the application thinks in (a whole video frame, an audio chunk, a controller report, a control message) and owns framing, fragmentation, reassembly, scheduling, shedding, the link probe, bitrate control, heartbeats and the radio keep-awake. `PhorosLegacyTransport` (in `PhorosNetwork`) is the v1 TCP wire behind it, byte for byte what Beam 3 and Beacon 1.4 speak. A later transport implements the same protocol and the application does not change.
+
+```swift
+// host
+let transport = PhorosLegacyTransport(accepting: connection, options: LegacyTransportOptions(role: .host))
+transport.onInbound = { inbound in
+    switch inbound {
+    case .message(let json): handlePairing(json)                 // hello, code_verify, auth_request
+    case .control(let message): handle(message)                  // pings and pongs are already answered
+    case .input(let report, let connected): gamepad.handle(report, connected: connected)
+    case .unknownControl: break                                  // a newer peer; see compatibility.md
+    default: break
+    }
+}
+transport.onKeyframeNeeded = { encoder.requestKeyframe() }
+transport.onBitrateChange = { encoder.setBitrate($0) }
+transport.start()
+// after auth_success
+transport.setSendPolicy(audioCodec == .pcmFloat32 ? .pcmAudio : SendPolicy())
+transport.setMaximumBitrate(preset.bitrate)
+transport.setStreaming(true)
+capture.onFrame = { frame in if transport.acceptsVideoFrame { encoder.encode(frame) } }
+encoder.onParameterSets = { transport.sendVideoParameterSets($0, codec: $1) }
+encoder.onFrame = { annexB, pts, key in transport.sendVideo(annexB, presentationTimestamp: pts, isKeyframe: key) }
+
+// client
+let transport = PhorosLegacyTransport(to: endpoint)
+transport.onInbound = { inbound in
+    switch inbound {
+    case .video(let frame): decode(frame)
+    case .videoParameterSets(let sets, let codec): rebuildDecoder(sets, codec)
+    case .audio(let header, let body, let codec): play(header, body, codec)
+    case .message(let json): handlePairing(json)
+    case .control(let message): handle(message)
+    default: break
+    }
+}
+transport.start()
+transport.sendMessage(authRequestJSON)
+transport.sendInput(report, connected: true)     // latest value, never queued behind video
+```
+
+`metrics` is a snapshot (round trip, queueing delay, bitrate, drain rate, pending video bytes, drops) safe from any thread. `onTrace` reports the points a harness stamps. What follows is what the transport does inside, for an application that needs its own transport.
+
 ## Sending media
 
 The host owns one `SendScheduler` per connection.
@@ -106,11 +152,15 @@ The host owns one `SendScheduler` per connection.
 ```swift
 var scheduler = SendScheduler()                      // or SendPolicy.pcmAudio for a PCM-only client
 
+// capture, before the encoder sees the frame
+guard scheduler.admitCapture() else { return }       // the link is behind: skip it, no reference breaks
+encoder.encode(captured)
+
 // video, from the encoder callback
 guard scheduler.admitVideo(isKeyframe: isKeyframe) else { return }
-for payload in VideoFragmentHeader.fragment(annexB, frameNumber: n, presentationTimestamp: pts, maximumPayloadLength: 1400) {
-    scheduler.enqueue(Packet.encode(isKeyframe ? .videoKeyframe : .video, payload: payload).lengthPrefixed(), lane: .video)
-}
+let packets = VideoFragmentHeader.fragment(annexB, frameNumber: n, presentationTimestamp: pts, maximumPayloadLength: 1400)
+    .map { Packet.encode(isKeyframe ? .videoKeyframe : .video, payload: $0).lengthPrefixed() }
+scheduler.enqueueVideoFrame(packets, isKeyframe: isKeyframe)   // one write per frame
 
 // audio, from the encoder callback
 guard scheduler.admitAudio() else { return }
@@ -129,7 +179,26 @@ while let write = scheduler.dequeue() {
 }
 ```
 
-`admitVideo` refuses delta frames when the backlog is above `policy.maximumQueuedBytes` and never refuses a keyframe. `admitAudio` refuses only on the audio backlog and never for longer than `policy.maximumAudioSilence`. `dequeue` returns control first, then audio, then video, and holds at `policy.maximumConcurrentWrites` outstanding writes.
+`admitCapture` and `admitVideo` refuse when the video between the encoder and the peer is above the budget: bytes queued here, bytes handed to the transport, and bytes the transport reports it still holds (`transportBacklog`, the kernel's unacknowledged bytes on TCP; a write completes when the kernel takes it, not when the peer has it). The budget is `policy.maximumQueuedBytes`, or less once the drain rate says that many bytes would take longer than `policy.maximumQueueDelay` to send. Refuse at capture when you can: a skipped capture costs nothing, while a frame dropped after encoding breaks the reference chain, so `admitVideo` then refuses every delta until a keyframe is enqueued and sets `needsKeyframe` for you to ask the encoder. A keyframe is never refused. Queued delta frames older than `policy.maximumVideoQueueAge` are shed at `dequeue`. `admitAudio` refuses only on the audio backlog and never for longer than `policy.maximumAudioSilence`. `dequeue` returns control first, then audio, then video, and holds at `policy.maximumConcurrentWrites` outstanding writes.
+
+### Bitrate from the link
+
+The transport never drops, so when the encoder produces more than the link carries, nothing is lost: the bytes wait in the sender's socket buffer and the access point, and every frame arrives late by that much. The peer sees a smooth stream and reports it healthy. The one signal that shows the queue is the round trip of a small control message on the same connection, because it waits behind the same bytes. `BitrateController` reads it.
+
+```swift
+var bitrate = BitrateController(maximum: preset.bitrate)   // starts at 4 Mbps and climbs
+
+// five times a second while streaming
+if probe.shouldSend() { pingSentAt = now; send(.ping) }
+
+// on pong
+if let rtt = probe.receivedPong(), pingSentAt > lastKeyframeBurstEnd {   // a ping behind a keyframe measures the keyframe
+    bitrate.observe(roundTrip: rtt)
+    if let next = bitrate.evaluate() { encoder.setBitrate(next) }       // live, no restart
+}
+```
+
+The controller cuts 0.7x once the queueing delay (round trip minus its recent floor) has held or grown for two samples (one high sample is a Wi-Fi spike, two are a queue), 0.5x above 150 ms, and climbs 1.15x every two seconds once it is clear. A new link starts at 4 Mbps and climbs 1.5x every 0.6 s until the first cut. `setMaximum` follows a preset change. The `QualityLadder` below stays the structural fallback for a link that cannot carry the preset at all.
 
 ## Pause and resume
 
@@ -192,6 +261,41 @@ heartbeat.heard()
 // on pong
 if let rtt = probe.receivedPong() { showLinkQuality(rtt) }
 ```
+
+## Frame rate
+
+A client sends the highest frame rate it wants, normally its display's refresh rate, and the host captures at that rate when its own display can supply it. A client that sends nothing gets the preset's rate.
+
+```swift
+// client
+ClientCapabilities(deviceName: name, deviceID: id, maximumFrameRate: Double(screen.maximumFramesPerSecond))
+
+// host, when a client joins or leaves, and on every preset change
+let rate = sessions.map { $0.peer.videoFrameRate(preset: preset.frameRate, hostRefreshRate: display.refreshRate) }.min()
+```
+
+Only the 60 fps presets are raised. A 165 Hz Mac and a 120 Hz phone give 120 fps; each frame the host adds is a fresher frame at the phone's next refresh. Measured on the reference host, button to decoded frame at 1080p60 went from 27.5/32.9 ms (p50/p95) at 60 fps to 19.1/25.0 at 120.
+
+## Clock sync
+
+The host stamps every frame with its capture time on its own clock. A client that wants to know how old a frame is when it arrives needs the offset between the two clocks.
+
+```swift
+// client
+var clock = ClockSync()
+// four times a second, if host.supportsClockSync
+send(.clockProbe(clock.probe(now: nowMicros())))
+// on reply
+case .clockReply(let reply): clock.reply(reply, now: nowMicros())
+// on every assembled frame
+if let age = clock.age(ofPresentationTimestamp: frame.presentationTimestamp, now: nowMicros()) { meter.record(age) }
+
+// host
+case .clockProbe(let probe):
+    send(.clockReply(ClockReply(id: probe.id, sentAt: probe.sentAt, receivedAt: nowMicros(), repliedAt: nowMicros())))
+```
+
+`ClockSync` keeps the offset from the sample with the shortest recent round trip, so queueing on the way makes an estimate worse only until a clean sample arrives. Times are microseconds of `CMClockGetHostTimeClock`, the clock the reference host stamps video with.
 
 ## Quality adaptation
 

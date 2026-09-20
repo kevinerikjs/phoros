@@ -12,6 +12,10 @@ public struct ClientCapabilities: Equatable, Sendable {
     public var videoCodecs: [VideoCodecID]
     public var preferredAudioSampleRate: Double?
     public var wantsAudio: Bool
+    /// The highest video frame rate this client wants, normally its display's
+    /// refresh rate. `nil` asks for the preset's own rate. See
+    /// `PairingMessage.maximumFrameRate`.
+    public var maximumFrameRate: Double?
 
     public init(
         deviceName: String,
@@ -19,7 +23,8 @@ public struct ClientCapabilities: Equatable, Sendable {
         audioCodecs: [AudioCodecID] = [.aacLC, .pcmFloat32],
         videoCodecs: [VideoCodecID] = [.hevc, .h264],
         preferredAudioSampleRate: Double? = nil,
-        wantsAudio: Bool = true
+        wantsAudio: Bool = true,
+        maximumFrameRate: Double? = nil
     ) {
         self.deviceName = deviceName
         self.deviceID = deviceID
@@ -27,6 +32,7 @@ public struct ClientCapabilities: Equatable, Sendable {
         self.videoCodecs = videoCodecs
         self.preferredAudioSampleRate = preferredAudioSampleRate
         self.wantsAudio = wantsAudio
+        self.maximumFrameRate = maximumFrameRate
     }
 
     /// The `hello` that starts pairing.
@@ -55,7 +61,8 @@ public struct ClientCapabilities: Equatable, Sendable {
             preferredAudioSampleRate: preferredAudioSampleRate,
             supportedAudioCodecs: audioCodecs.map(\.wireName),
             supportedVideoCodecs: videoCodecs.map(\.wireName),
-            wantsAudio: wantsAudio
+            wantsAudio: wantsAudio,
+            maximumFrameRate: maximumFrameRate
         )
     }
 }

@@ -49,6 +49,13 @@ public struct PeerCapabilities: Equatable, Sendable {
     /// The peer replays `.input` packets into a virtual game controller.
     public var supportsControllerInput: Bool
 
+    /// The peer answers `.clockProbe` with `.clockReply`.
+    public var supportsClockSync: Bool
+
+    /// The highest video frame rate the peer asked for, or `nil` for the
+    /// preset's own rate. See `PairingMessage.maximumFrameRate`.
+    public var maximumFrameRate: Double?
+
     public init(_ message: PairingMessage) {
         audioCodecs = PeerCapabilities.codecs(
             from: message.supportedAudioCodecs, parse: AudioCodecID.init(wireName:), fallback: .pcmFloat32
@@ -65,6 +72,17 @@ public struct PeerCapabilities: Equatable, Sendable {
         remoteHosts = message.remoteHosts ?? []
         controls = message.controls ?? []
         supportsControllerInput = message.supportsControllerInput ?? false
+        supportsClockSync = message.supportsClockSync ?? false
+        maximumFrameRate = message.maximumFrameRate.flatMap { $0 > 0 ? $0 : nil }
+    }
+
+    /// The frame rate to capture and encode for this peer: the preset's rate,
+    /// raised to the peer's `maximumFrameRate` when the preset is a 60 fps
+    /// one and the host's display (`hostRefreshRate`) can supply it. The 30
+    /// fps presets exist for constrained links and stay at 30.
+    public func videoFrameRate(preset presetRate: Double, hostRefreshRate: Double) -> Double {
+        guard presetRate >= 60, let wanted = maximumFrameRate else { return presetRate }
+        return max(presetRate, min(wanted, hostRefreshRate))
     }
 
     /// The first of `preferences` the peer can decode. Falls back to the
