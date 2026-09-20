@@ -99,6 +99,52 @@ case .rejected(let reply):
 
 Pass `audioPreferences: [.pcmFloat32]` to force PCM for a session, for example from a "safe mode" default.
 
+## The transport seam
+
+Since 1.4.0 an application does not have to assemble the pieces below by hand. `PhorosRealtimeTransport` (in `PhorosSession`) is the seam between an application and the wire: it sends and receives the units the application thinks in (a whole video frame, an audio chunk, a controller report, a control message) and owns framing, fragmentation, reassembly, scheduling, shedding, the link probe, bitrate control, heartbeats and the radio keep-awake. `PhorosLegacyTransport` (in `PhorosNetwork`) is the v1 TCP wire behind it, byte for byte what Beam 3 and Beacon 1.4 speak. A later transport implements the same protocol and the application does not change.
+
+```swift
+// host
+let transport = PhorosLegacyTransport(accepting: connection, options: LegacyTransportOptions(role: .host))
+transport.onInbound = { inbound in
+    switch inbound {
+    case .message(let json): handlePairing(json)                 // hello, code_verify, auth_request
+    case .control(let message): handle(message)                  // pings and pongs are already answered
+    case .input(let report, let connected): gamepad.handle(report, connected: connected)
+    case .unknownControl: break                                  // a newer peer; see compatibility.md
+    default: break
+    }
+}
+transport.onKeyframeNeeded = { encoder.requestKeyframe() }
+transport.onBitrateChange = { encoder.setBitrate($0) }
+transport.start()
+// after auth_success
+transport.setSendPolicy(audioCodec == .pcmFloat32 ? .pcmAudio : SendPolicy())
+transport.setMaximumBitrate(preset.bitrate)
+transport.setStreaming(true)
+capture.onFrame = { frame in if transport.acceptsVideoFrame { encoder.encode(frame) } }
+encoder.onParameterSets = { transport.sendVideoParameterSets($0, codec: $1) }
+encoder.onFrame = { annexB, pts, key in transport.sendVideo(annexB, presentationTimestamp: pts, isKeyframe: key) }
+
+// client
+let transport = PhorosLegacyTransport(to: endpoint)
+transport.onInbound = { inbound in
+    switch inbound {
+    case .video(let frame): decode(frame)
+    case .videoParameterSets(let sets, let codec): rebuildDecoder(sets, codec)
+    case .audio(let header, let body, let codec): play(header, body, codec)
+    case .message(let json): handlePairing(json)
+    case .control(let message): handle(message)
+    default: break
+    }
+}
+transport.start()
+transport.sendMessage(authRequestJSON)
+transport.sendInput(report, connected: true)     // latest value, never queued behind video
+```
+
+`metrics` is a snapshot (round trip, queueing delay, bitrate, drain rate, pending video bytes, drops) safe from any thread. `onTrace` reports the points a harness stamps. What follows is what the transport does inside, for an application that needs its own transport.
+
 ## Sending media
 
 The host owns one `SendScheduler` per connection.

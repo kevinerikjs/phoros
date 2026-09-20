@@ -35,8 +35,8 @@ Screen mirroring is one use, not the definition. Phoros ships inside [Beam](http
 | Product | What it is | Depends on |
 |---|---|---|
 | **`Phoros`** | The wire contract: packet framing, media headers, handshake and control messages, codec negotiation. | Foundation |
-| **`PhorosSession`** | The logic on top: pairing and auth state machines, frame reassembly, audio sequencing, send scheduling, quality adaptation. No I/O. | `Phoros` |
-| **`PhorosNetwork`** | The transport: one call gives you a framed, size-bounded connection over `Network.framework`. | `Phoros`, Network |
+| **`PhorosSession`** | The logic on top: pairing and auth state machines, frame reassembly, audio sequencing, send scheduling, link-driven bitrate, clock sync, quality adaptation, and the transport seam. No I/O. | `Phoros` |
+| **`PhorosNetwork`** | The transport: the v1 TCP wire behind the seam, or one call for a framed, size-bounded connection over `Network.framework`. | `Phoros`, `PhorosSession`, Network |
 | **`PhorosMedia`** | The codecs, shaped for the wire: H.264/HEVC via VideoToolbox, AAC-LC via AudioToolbox, parameter sets, Annex B, sample buffers. | `Phoros`, VideoToolbox, AudioToolbox |
 | **`PhorosInput`** | Input back to the host: controller sampling, a virtual HID gamepad, keyboard, text, media-key and click replay, and tap-to-source geometry. | `Phoros`, GameController, IOKit, CoreGraphics |
 
@@ -150,7 +150,7 @@ Every type in `PhorosSession` exists because a shipped build got something wrong
 swift test
 ```
 
-118 tests. The `Phoros` suite pins the exact bytes of every header and the exact JSON of every message as shipped peers send them. A wire break fails here first. The `PhorosSession` suite replays the incidents above. The `PhorosMedia` suite builds a real H.264 format description from real SPS/PPS bytes and round-trips audio through the AAC encoder and decoder. The `PhorosInput` suite pins the HID report descriptor, the mapping from a wire report to HID bytes, and the tap-to-source geometry.
+123 tests. The `Phoros` suite pins the exact bytes of every header and the exact JSON of every message as shipped peers send them. A wire break fails here first. The `PhorosSession` suite replays the incidents above. The `PhorosMedia` suite builds a real H.264 format description from real SPS/PPS bytes and round-trips audio through the AAC encoder and decoder. The `PhorosInput` suite pins the HID report descriptor, the mapping from a wire report to HID bytes, and the tap-to-source geometry.
 
 Before you release an app built on Phoros, also test on real devices in three combinations:
 

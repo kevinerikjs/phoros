@@ -28,11 +28,12 @@ let package = Package(
     targets: [
         .target(name: "Phoros"),
         .target(name: "PhorosSession", dependencies: ["Phoros"]),
-        .target(name: "PhorosNetwork", dependencies: ["Phoros"]),
+        .target(name: "PhorosNetwork", dependencies: ["Phoros", "PhorosSession"]),
         .target(name: "PhorosMedia", dependencies: ["Phoros"]),
         .target(name: "PhorosInput", dependencies: ["Phoros"]),
         .testTarget(name: "PhorosTests", dependencies: ["Phoros"]),
         .testTarget(name: "PhorosSessionTests", dependencies: ["PhorosSession"]),
+        .testTarget(name: "PhorosNetworkTests", dependencies: ["PhorosNetwork"]),
         .testTarget(name: "PhorosMediaTests", dependencies: ["PhorosMedia"]),
         .testTarget(name: "PhorosInputTests", dependencies: ["PhorosInput"])
     ]
