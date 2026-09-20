@@ -67,7 +67,7 @@ final class ControlTests: XCTestCase {
             "ping", "pong", "stream_request", "stream_stop",
             "quality_feedback", "quality_request", "quality_changed",
             "viewport_lock_request", "video_pause", "video_resume",
-            "audio_format_changed", "audio_enable_request",
+            "audio_format_changed", "audio_enable_request", "bitrate_cap_request",
             "window_list_request", "window_list", "window_select_request", "capture_mode_changed",
             "media_key",
             "clock_probe", "clock_reply",
