@@ -37,20 +37,41 @@ public final class PhorosPeerTransport: PhorosRealtimeTransport {
     public init(peer: RealtimePeer, queue: DispatchQueue = DispatchQueue(label: "phoros.peer.transport", qos: .userInteractive)) {
         self.peer = peer
         self.queue = queue
+        peer.onData = { [weak self] channel, bytes in self?.handle(Data(bytes)) }
+        peer.onVideo = { [weak self] frame in
+            guard let self else { return }
+            let number = self.receivedFrames
+            self.receivedFrames &+= 1
+            if !frame.contiguous { self.onKeyframeNeeded?() }
+            self.onInbound?(.video(AssembledFrame(frameNumber: number, presentationTimestamp: frame.presentationTimestamp, isKeyframe: frame.isKeyframe, bitstream: frame.annexB)))
+        }
         peer.onEvent = { [weak self] event in
             guard let self else { return }
             if case .connected = event, !self.ready { self.ready = true; self.onReady?() }
             if case .disconnected = event { self.onEnd?(PeerTransportEnd.disconnected) }
+            if case .bandwidth(let bps) = event {
+                // TWCC says what the link carries; the encoder follows, capped by the preset.
+                let next = min(self.maximumBitrate, max(500_000, bps))
+                if next != self.metrics.bitrate { self.metrics.bitrate = next; self.onBitrateChange?(next) }
+            }
         }
-        peer.onData = { [weak self] channel, bytes in self?.handle(Data(bytes)) }
     }
+    private var receivedFrames: UInt32 = 0
+    private var maximumBitrate = Int.max
+    /// RTP video, or the data channels (the first spike). RTP is the path.
+    public var videoOverRTP = true
+    public var codec: VideoCodecID = .h264
 
     public func start() {}
     public func cancel() { peer.destroy() }
     public func setStreaming(_ enabled: Bool) {}
     public func setSendPolicy(_ policy: SendPolicy) {}
     public var acceptsVideoFrame: Bool { true }
-    public func setMaximumBitrate(_ bitsPerSecond: Int) { onBitrateChange?(bitsPerSecond) }
+    public func setMaximumBitrate(_ bitsPerSecond: Int) {
+        maximumBitrate = bitsPerSecond
+        peer.setDesiredBitrate(bitsPerSecond)
+        onBitrateChange?(min(bitsPerSecond, max(metrics.bitrate, 500_000)))
+    }
     public func dropQueuedVideo() {}
 
     /// Messages the association's send buffer could not take yet, oldest first, with the
@@ -93,6 +114,7 @@ public final class PhorosPeerTransport: PhorosRealtimeTransport {
     }
 
     public func sendVideoParameterSets(_ data: Data, codec: VideoCodecID) {
+        self.codec = codec
         var payload = Data([codec.packetFlags])
         payload.append(data)
         send(.parameterSets, payload, realtime: false)
@@ -102,6 +124,12 @@ public final class PhorosPeerTransport: PhorosRealtimeTransport {
         let number = frameNumber
         frameNumber &+= 1
         onTrace?(.videoQueued(frame: number, presentationTimestamp: presentationTimestamp, bytes: annexB.count))
+        if videoOverRTP {
+            let status = peer.sendVideo(annexB, presentationTimestamp: presentationTimestamp, codec: codec == .hevc ? 1 : 0, isKeyframe: isKeyframe)
+            if status != 0 { metrics.droppedVideoFrames += 1; if !isKeyframe { onKeyframeNeeded?() } }
+            onTrace?(.videoHandedToLink(frame: number, linkBacklog: 0))
+            return
+        }
         // A keyframe goes on the reliable channel: it is the frame every later one depends
         // on, and a 300 KB keyframe in 48 KB messages with a 50 ms lifetime loses a fragment
         // whenever the association's window is small. Deltas go realtime: a late one is worth

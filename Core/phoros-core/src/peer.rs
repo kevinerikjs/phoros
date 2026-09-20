@@ -12,7 +12,10 @@ use std::time::{Duration, Instant};
 
 use str0m::channel::{ChannelConfig, ChannelId, Reliability};
 use str0m::ice::IceCreds;
+use str0m::media::{MediaKind, MediaTime, Mid};
 use str0m::net::{DatagramRecv, Protocol, Receive};
+use str0m::rtp::Ssrc;
+use str0m::bwe::Bitrate;
 use str0m::{Candidate, Event, Input, Output, Rtc};
 
 use crate::{PHOROS_ERR_BUSY, PHOROS_ERR_NULL, PHOROS_ERR_PANIC, PHOROS_ERR_POISONED, PHOROS_ERR_TOO_LARGE, PHOROS_MAX_DATAGRAM, PHOROS_OK};
@@ -24,6 +27,20 @@ pub const PHOROS_PEER_EVENT_DISCONNECTED: u32 = 13;
 
 pub const PHOROS_CHANNEL_RELIABLE: u32 = 0;
 pub const PHOROS_CHANNEL_REALTIME: u32 = 1;
+/// `on_data` channel for a decoded RTP video frame: 8 bytes of RTP time in microseconds,
+/// 1 byte keyframe, 1 byte contiguous (0 = packets were lost before it), then Annex B.
+pub const PHOROS_CHANNEL_VIDEO: u32 = 100;
+/// `on_event` value: the host's bandwidth estimate in bits per second (TWCC).
+pub const PHOROS_PEER_EVENT_BANDWIDTH: u32 = 14;
+
+pub const PHOROS_CODEC_H264: u32 = 0;
+pub const PHOROS_CODEC_H265: u32 = 1;
+const VIDEO_SSRC: u32 = 0x5048_4F52;
+const VIDEO_RTX_SSRC: u32 = 0x5048_4F53;
+const PT_H264: u8 = 96;
+const PT_H264_RTX: u8 = 97;
+const PT_H265: u8 = 98;
+const PT_H265_RTX: u8 = 99;
 
 /// Called for every message received on a data channel. `channel` is 0 (reliable) or 1
 /// (realtime). The bytes are valid for the duration of the call.
@@ -113,6 +130,24 @@ impl Inner {
                 let index = self.channels.iter().position(|c| *c == data.id).unwrap_or(0) as u32;
                 pending.push(Pending::Data(index, data.data));
             }
+            Event::MediaData(media) => {
+                let keyframe = match media.codec_extra {
+                    str0m::format::CodecExtra::H264(e) => e.is_keyframe,
+                    str0m::format::CodecExtra::H265(e) => e.is_keyframe,
+                    _ => false,
+                };
+                let micros = (media.time.as_seconds() * 1_000_000.0) as i64;
+                let mut buf = Vec::with_capacity(10 + media.data.len());
+                buf.extend_from_slice(&micros.to_le_bytes());
+                buf.push(keyframe as u8);
+                buf.push(media.contiguous as u8);
+                buf.extend_from_slice(&media.data);
+                pending.push(Pending::Data(PHOROS_CHANNEL_VIDEO, buf));
+            }
+            Event::EgressBitrateEstimate(kind) => {
+                let bps = match kind { str0m::bwe::BweKind::Twcc(b) => b.as_u64(), str0m::bwe::BweKind::Remb(_, b) => b.as_u64(), _ => return };
+                pending.push(Pending::Event(PHOROS_PEER_EVENT_BANDWIDTH, bps as i64));
+            }
             _ => {}
         }
     }
@@ -157,11 +192,17 @@ pub unsafe extern "C" fn phoros_peer_create(
     let Some(addr) = cstr(local_addr).and_then(|s| s.parse::<SocketAddr>().ok()) else { return std::ptr::null_mut() };
     let built = guard(|| {
         let provider = Arc::new(str0m_apple_crypto::default_provider());
-        let mut rtc = Rtc::builder()
+        let mut builder = Rtc::builder()
             .set_crypto_provider(provider)
             .set_ice_lite(is_host)
             .set_local_ice_credentials(IceCreds::new())
-            .build(Instant::now());
+            .clear_codecs();
+        // H.264 (packetization mode 1, high profile) and H.265, each with an RTX stream, so
+        // str0m packetizes the Annex B frames the encoder produces and can resend on NACK.
+        builder.codec_config().add_h264(PT_H264.into(), Some(PT_H264_RTX.into()), true, 0x64_00_1f);
+        builder.codec_config().add_h265(PT_H265.into(), Some(PT_H265_RTX.into()), 1, 0, 120);
+        if is_host { builder = builder.enable_bwe(Some(Bitrate::kbps(4_000))); }
+        let mut rtc = builder.build(Instant::now());
         rtc.direct_api().set_ice_controlling(!is_host);
         let candidate = Candidate::host(addr, Protocol::Udp).map_err(|_| PHOROS_ERR_NULL)?;
         rtc.add_local_candidate(candidate);
@@ -241,6 +282,15 @@ pub unsafe extern "C" fn phoros_peer_set_remote(peer: *mut PhorosPeer, info: *co
                 inner.channels = vec![reliable, realtime];
             }
         }
+        // One video media line, one stream each way, fixed SSRCs both sides know.
+        let mid: Mid = "0".into();
+        inner.rtc.direct_api().declare_media(mid, MediaKind::Video);
+        if is_host {
+            inner.rtc.direct_api().declare_stream_tx(Ssrc::from(VIDEO_SSRC), Some(Ssrc::from(VIDEO_RTX_SSRC)), mid, None);
+        } else {
+            inner.rtc.direct_api().expect_stream_rx(Ssrc::from(VIDEO_SSRC), Some(Ssrc::from(VIDEO_RTX_SSRC)), mid, None);
+            inner.rtc.direct_api().enable_twcc_feedback();
+        }
         let candidate = Candidate::host(addr, Protocol::Udp).map_err(|_| PHOROS_ERR_NULL)?;
         inner.rtc.add_remote_candidate(candidate);
         let at = inner.instant(now_us);
@@ -317,6 +367,43 @@ pub unsafe extern "C" fn phoros_peer_send(peer: *mut PhorosPeer, channel: u32, b
         if let Ok(p) = peer.poke.lock() {
             if let Some((sock, to)) = p.as_ref() { let _ = sock.send_to(&[0u8], to); }
         }
+        Ok(())
+    }) { Ok(()) => PHOROS_OK, Err(e) => e }
+}
+
+/// One encoded video frame, Annex B, at `pts_us` on the media clock. str0m packetizes it
+/// (FU-A for H.264, FU for H.265) and pacing, NACK and TWCC apply. Host only.
+#[no_mangle]
+pub unsafe extern "C" fn phoros_peer_send_video(peer: *mut PhorosPeer, bytes: *const u8, len: usize, pts_us: i64, codec: u32, is_keyframe: bool) -> i32 {
+    if peer.is_null() || bytes.is_null() { return PHOROS_ERR_NULL; }
+    let peer = &*peer;
+    match guard(|| {
+        let mut inner = peer.inner.lock().map_err(|_| PHOROS_ERR_POISONED)?;
+        let slice = std::slice::from_raw_parts(bytes, len);
+        let pt = if codec == PHOROS_CODEC_H265 { PT_H265 } else { PT_H264 };
+        let mid: Mid = "0".into();
+        let rtp_time = MediaTime::from_90khz((pts_us.max(0) as u64) * 9 / 100);
+        let wallclock = inner.base_instant + Duration::from_micros(pts_us.max(0) as u64);
+        let _ = is_keyframe;
+        let writer = inner.rtc.writer(mid).ok_or(PHOROS_ERR_NULL)?;
+        writer.write(pt.into(), wallclock, rtp_time, slice).map_err(|_| PHOROS_ERR_BUSY)?;
+        drop(inner);
+        if let Ok(p) = peer.poke.lock() {
+            if let Some((sock, to)) = p.as_ref() { let _ = sock.send_to(&[0u8], to); }
+        }
+        Ok(())
+    }) { Ok(()) => PHOROS_OK, Err(e) => e }
+}
+
+/// Asks the host's bandwidth estimator to aim for this bitrate; what it reports through
+/// PHOROS_PEER_EVENT_BANDWIDTH is what the link allows. Host only.
+#[no_mangle]
+pub unsafe extern "C" fn phoros_peer_set_desired_bitrate(peer: *mut PhorosPeer, bits_per_second: u64) -> i32 {
+    if peer.is_null() { return PHOROS_ERR_NULL; }
+    let peer = &*peer;
+    match guard(|| {
+        let mut inner = peer.inner.lock().map_err(|_| PHOROS_ERR_POISONED)?;
+        inner.rtc.bwe().set_desired_bitrate(Bitrate::bps(bits_per_second));
         Ok(())
     }) { Ok(()) => PHOROS_OK, Err(e) => e }
 }

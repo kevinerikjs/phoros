@@ -7,6 +7,18 @@ public enum PeerEvent: Equatable {
     case channelOpen(Int)
     case iceState(Int)
     case disconnected
+    /// The host's bandwidth estimate from TWCC feedback, bits per second.
+    case bandwidth(Int)
+}
+
+/// A video frame received over RTP.
+public struct PeerVideoFrame {
+    public var presentationTimestamp: Int64
+    public var isKeyframe: Bool
+    /// False when packets before this frame were lost; the decoder may show artefacts
+    /// until the next keyframe.
+    public var contiguous: Bool
+    public var annexB: Data
 }
 
 /// One str0m peer: ICE (lite on the host), DTLS, SCTP and two data channels, reliable and
@@ -21,10 +33,13 @@ public final class RealtimePeer {
     private final class Box {
         var onEvent: ((PeerEvent) -> Void)?
         var onData: ((Int, UnsafeRawBufferPointer) -> Void)?
+        var onVideo: ((PeerVideoFrame) -> Void)?
     }
     public var onEvent: ((PeerEvent) -> Void)? { get { box.onEvent } set { box.onEvent = newValue } }
     /// Called with each message; the bytes are valid for the call only.
     public var onData: ((Int, UnsafeRawBufferPointer) -> Void)? { get { box.onData } set { box.onData = newValue } }
+    /// Called with each whole video frame received over RTP.
+    public var onVideo: ((PeerVideoFrame) -> Void)? { get { box.onVideo } set { box.onVideo = newValue } }
 
     public let localAddress: String
     public let isHost: Bool
@@ -42,12 +57,25 @@ public final class RealtimePeer {
             case UInt32(PHOROS_PEER_EVENT_CHANNEL_OPEN): box.onEvent?(.channelOpen(Int(value)))
             case UInt32(PHOROS_PEER_EVENT_ICE_STATE): box.onEvent?(.iceState(Int(value)))
             case UInt32(PHOROS_PEER_EVENT_DISCONNECTED): box.onEvent?(.disconnected)
+            case UInt32(PHOROS_PEER_EVENT_BANDWIDTH): box.onEvent?(.bandwidth(Int(value)))
             default: break
             }
         }, { user, channel, bytes, len in
             guard let user else { return }
             let box = Unmanaged<Box>.fromOpaque(user).takeUnretainedValue()
-            box.onData?(Int(channel), UnsafeRawBufferPointer(start: bytes, count: len))
+            let buffer = UnsafeRawBufferPointer(start: bytes, count: len)
+            if channel == UInt32(PHOROS_CHANNEL_VIDEO) {
+                guard len >= 10 else { return }
+                let frame = PeerVideoFrame(
+                    presentationTimestamp: buffer.load(as: Int64.self),
+                    isKeyframe: buffer[8] != 0,
+                    contiguous: buffer[9] != 0,
+                    annexB: Data(buffer[10...])
+                )
+                box.onVideo?(frame)
+            } else {
+                box.onData?(Int(channel), buffer)
+            }
         }, isHost, localAddress)
         if handle == nil { return nil }
     }
@@ -105,6 +133,22 @@ public final class RealtimePeer {
     @discardableResult
     public func send(channel: Int, _ data: Data) -> Int32 {
         data.withUnsafeBytes { send(channel: channel, $0) }
+    }
+
+    /// One encoded frame over RTP. Host only. `busy` when the writer refused it.
+    @discardableResult
+    public func sendVideo(_ annexB: Data, presentationTimestamp: Int64, codec: Int, isKeyframe: Bool) -> Int32 {
+        lock.lock(); defer { lock.unlock() }
+        guard let handle else { return Int32(PHOROS_ERR_DESTROYED) }
+        return annexB.withUnsafeBytes { phoros_peer_send_video(handle, $0.baseAddress?.assumingMemoryBound(to: UInt8.self), $0.count, presentationTimestamp, UInt32(codec), isKeyframe) }
+    }
+
+    /// The bitrate the host's bandwidth estimator should aim for. Host only.
+    @discardableResult
+    public func setDesiredBitrate(_ bitsPerSecond: Int) -> Int32 {
+        lock.lock(); defer { lock.unlock() }
+        guard let handle else { return Int32(PHOROS_ERR_DESTROYED) }
+        return phoros_peer_set_desired_bitrate(handle, UInt64(max(0, bitsPerSecond)))
     }
 
     /// Design B: the core binds `localAddress` and runs its own thread.
