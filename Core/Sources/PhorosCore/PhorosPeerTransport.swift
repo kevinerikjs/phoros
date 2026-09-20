@@ -17,6 +17,9 @@ public final class PhorosPeerTransport: PhorosRealtimeTransport {
     public var onInbound: ((RealtimeInbound) -> Void)?
     public var onReady: (() -> Void)?
     public var onEnd: ((Error) -> Void)?
+    /// The ICE link came up (true) or went away (false). str0m keeps the peer alive through
+    /// a stall and reconnects on its own; the host moves media to the fallback meanwhile.
+    public var onLinkStateChange: ((Bool) -> Void)?
     public var onKeyframeNeeded: (() -> Void)?
     public var onBitrateChange: ((Int) -> Void)?
     public var onTrace: ((RealtimeTrace) -> Void)?
@@ -49,6 +52,10 @@ public final class PhorosPeerTransport: PhorosRealtimeTransport {
             guard let self else { return }
             if case .connected = event, !self.ready { self.ready = true; self.onReady?() }
             if case .disconnected = event { self.onEnd?(PeerTransportEnd.disconnected) }
+            if case .iceState(let state) = event {
+                // is::IceConnectionState: 0 new, 1 checking, 2 connected, 3 completed, 4 disconnected
+                if state == 4 { self.onLinkStateChange?(false) } else if state >= 2 { self.onLinkStateChange?(true) }
+            }
             if case .bandwidth(let bps) = event {
                 // TWCC says what the link carries; the encoder follows, capped by the preset.
                 let next = min(self.maximumBitrate, max(500_000, bps))
