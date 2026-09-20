@@ -63,6 +63,8 @@ struct Inner {
     connected: bool,
     /// When str0m last asked to be polled again.
     next_timeout: Option<Instant>,
+    /// TWCC has produced an estimate at least once.
+    bwe_reported: bool,
 }
 unsafe impl Send for Inner {}
 
@@ -145,6 +147,7 @@ impl Inner {
                 pending.push(Pending::Data(PHOROS_CHANNEL_VIDEO, buf));
             }
             Event::EgressBitrateEstimate(kind) => {
+                self.bwe_reported = true;
                 let bps = match kind { str0m::bwe::BweKind::Twcc(b) => b.as_u64(), str0m::bwe::BweKind::Remb(_, b) => b.as_u64(), _ => return };
                 pending.push(Pending::Event(PHOROS_PEER_EVENT_BANDWIDTH, bps as i64));
             }
@@ -213,7 +216,7 @@ pub unsafe extern "C" fn phoros_peer_create(
         inner: Arc::new(Mutex::new(Inner {
             rtc, user, on_event, on_data, is_host, local_addr: addr, remote_addr: None,
             base_instant: Instant::now(), base_us: None, channels: Vec::new(),
-            outbox: Vec::with_capacity(2048), outbox_to: None, connected: false, next_timeout: None,
+            outbox: Vec::with_capacity(2048), outbox_to: None, connected: false, next_timeout: None, bwe_reported: false,
         })),
         socket_thread: Mutex::new(None),
         stop: Arc::new(AtomicBool::new(false)),
@@ -404,6 +407,9 @@ pub unsafe extern "C" fn phoros_peer_set_desired_bitrate(peer: *mut PhorosPeer, 
     match guard(|| {
         let mut inner = peer.inner.lock().map_err(|_| PHOROS_ERR_POISONED)?;
         inner.rtc.bwe().set_desired_bitrate(Bitrate::bps(bits_per_second));
+        // Until TWCC has reported once the estimate is str0m's 4 Mbps default, and the pacer
+        // drains a 1080p keyframe at that rate. Start from what the preset asks for.
+        if !inner.bwe_reported { inner.rtc.bwe().reset(Bitrate::bps(bits_per_second)); }
         Ok(())
     }) { Ok(()) => PHOROS_OK, Err(e) => e }
 }
