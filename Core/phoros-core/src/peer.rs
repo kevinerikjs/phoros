@@ -216,10 +216,11 @@ pub unsafe extern "C" fn phoros_peer_create(
         // str0m packetizes the Annex B frames the encoder produces and can resend on NACK.
         builder.codec_config().add_h264(PT_H264.into(), Some(PT_H264_RTX.into()), true, 0x64_00_1f);
         builder.codec_config().add_h265(PT_H265.into(), Some(PT_H265_RTX.into()), 1, 0, 120);
-        // PHOROS_NOBWE=1 builds the host without the bandwidth estimator, and with it str0m's
-        // pacer: an experiment switch for the harness, to tell pacing stalls from the rest.
-        let no_bwe = std::env::var("PHOROS_NOBWE").map(|v| v == "1").unwrap_or(false);
-        if is_host && !no_bwe { builder = builder.enable_bwe(Some(Bitrate::kbps(4_000))); }
+        // No bandwidth estimator by default: with it comes str0m's pacer, which paces at the
+        // estimate and held frames 100-1000 ms whenever TWCC undershot our rate-controlled
+        // stream. PHOROS_BWE=1 turns it back on for experiments.
+        let bwe = std::env::var("PHOROS_BWE").map(|v| v == "1").unwrap_or(false);
+        if is_host && bwe { builder = builder.enable_bwe(Some(Bitrate::kbps(4_000))); }
         let mut rtc = builder.build(Instant::now());
         rtc.direct_api().set_ice_controlling(!is_host);
         let candidate = Candidate::host(addr, Protocol::Udp).map_err(|_| PHOROS_ERR_NULL)?;
