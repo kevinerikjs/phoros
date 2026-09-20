@@ -54,7 +54,7 @@ Phoros is the third option with the production lessons already applied. You brin
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/kevinerikjs/phoros.git", exact: "1.3.0")
+    .package(url: "https://github.com/kevinerikjs/phoros.git", exact: "1.4.0")
 ],
 targets: [
     .target(name: "MyHost", dependencies: [
