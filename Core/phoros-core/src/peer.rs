@@ -490,7 +490,23 @@ pub unsafe extern "C" fn phoros_peer_run_own_socket(peer: *mut PhorosPeer) -> i3
         // PHOROS_SPREAD_US=<micros>: an experiment switch, a pause after each media-sized
         // datagram so a frame's packets go out spaced instead of as one burst.
         let spread_us: u64 = std::env::var("PHOROS_SPREAD_US").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+        // PHOROS_DELAY_US=<micros>: an experiment switch, every datagram leaves that much
+        // later (one-way delay emulation on loopback, so NACK and FEC pay a real round trip).
+        let delay_us: u64 = std::env::var("PHOROS_DELAY_US").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+        let mut delayed: std::collections::VecDeque<(Instant, Vec<u8>, SocketAddr)> = std::collections::VecDeque::new();
+        // PHOROS_FEC=<k>: after every k media datagrams a repair datagram carrying their XOR
+        // (datagram-level, protocol-agnostic: the receiver rebuilds one lost datagram of the
+        // group without a round trip and feeds it to the state machine as if it had arrived).
+        let fec_k: usize = std::env::var("PHOROS_FEC").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+        let mut fec = FecEncoder::new(fec_k);
+        let mut fec_rx = FecDecoder::new();
         while !stop.load(Ordering::SeqCst) {
+            // delayed datagrams whose time has come
+            while let Some((at, _, _)) = delayed.front() {
+                if *at > Instant::now() { break; }
+                let (_, bytes, to) = delayed.pop_front().unwrap();
+                let _ = socket.send_to(&bytes, to);
+            }
             // drain outbound, then dispatch what the state machine produced, lock released
             let mut pending = Vec::new();
             let callbacks;
@@ -505,7 +521,17 @@ pub unsafe extern "C" fn phoros_peer_run_own_socket(peer: *mut PhorosPeer) -> i3
                         // media-sized datagrams on the floor to exercise NACK and RTX.
                         let dropped = drop_percent > 0 && inner.outbox.len() > 200 && (drop_seed.wrapping_mul(1103515245).wrapping_add(12345) >> 16) % 100 < drop_percent;
                         drop_seed = drop_seed.wrapping_mul(1103515245).wrapping_add(12345);
-                        if let Some(to) = inner.outbox_to { if !dropped { let _ = socket.send_to(&inner.outbox, to); } }
+                        if let Some(to) = inner.outbox_to {
+                            let mut out: Vec<(Vec<u8>, SocketAddr)> = Vec::with_capacity(2);
+                            if !dropped { out.push((inner.outbox.clone(), to)); }
+                            if fec_k > 0 && inner.outbox.len() > 200 {
+                                if let Some(repair) = fec.push(&inner.outbox) { out.push((repair, to)); }
+                            }
+                            for (bytes, to) in out {
+                                if delay_us > 0 { delayed.push_back((Instant::now() + Duration::from_micros(delay_us), bytes, to)); }
+                                else { let _ = socket.send_to(&bytes, to); }
+                            }
+                        }
                         let sent_at = last_send_us.swap(-1, Ordering::Relaxed);
                         if sent_at >= 0 {
                             let d = stats_base.elapsed().as_micros() as i64 - sent_at;
@@ -527,18 +553,29 @@ pub unsafe extern "C" fn phoros_peer_run_own_socket(peer: *mut PhorosPeer) -> i3
                     Ok(i) => i.next_timeout.map(|at| at.saturating_duration_since(Instant::now())).unwrap_or(Duration::from_millis(5)),
                     Err(_) => return,
                 };
+                let wait = match delayed.front() { Some((at, _, _)) => wait.min(at.saturating_duration_since(Instant::now())), None => wait };
                 let _ = socket.set_read_timeout(Some(wait.max(Duration::from_micros(100)).min(Duration::from_millis(50))));
             }
             match socket.recv_from(&mut buf) {
                 Ok((_, from)) if Some(from) == poke_addr => {}   // a poke: loop and drain
                 Ok((n, from)) => {
                     last_recv_us.store(stats_base.elapsed().as_micros() as i64, Ordering::Relaxed);
+                    // a repair datagram, or a media datagram the decoder tracks for repair
+                    let mut datagrams: Vec<Vec<u8>> = Vec::with_capacity(2);
+                    if FecDecoder::is_repair(&buf[..n]) {
+                        if let Some(recovered) = fec_rx.repair(&buf[..n]) { datagrams.push(recovered); }
+                    } else {
+                        if n > 200 { fec_rx.saw(&buf[..n]); }
+                        datagrams.push(buf[..n].to_vec());
+                    }
                     let mut inner = match inner.lock() { Ok(i) => i, Err(_) => return };
                     let now_us = start.elapsed().as_micros() as i64;
                     let at = inner.instant(now_us);
                     let destination = inner.local_addr;
-                    if let Ok(contents) = DatagramRecv::try_from(&buf[..n]) {
-                        let _ = inner.rtc.handle_input(Input::Receive(at, Receive { proto: Protocol::Udp, source: from, destination, contents }));
+                    for d in datagrams {
+                        if let Ok(contents) = DatagramRecv::try_from(&d[..]) {
+                            let _ = inner.rtc.handle_input(Input::Receive(at, Receive { proto: Protocol::Udp, source: from, destination, contents }));
+                        }
                     }
                 }
                 Err(_) => {}
@@ -599,3 +636,104 @@ fn raise_thread_priority() {
 }
 #[cfg(not(any(target_os = "macos", target_os = "ios")))]
 fn raise_thread_priority() {}
+
+/// Datagram-level XOR FEC. A repair datagram: magic 0xFE 0xC0, group id (u32), k (u8), then
+/// for each member its length (u16) and the XOR of the members padded to the longest. The
+/// magic byte is outside RTP/DTLS/STUN ranges, so nothing else claims it.
+const FEC_MAGIC: [u8; 2] = [0xFE, 0xC0];
+
+struct FecEncoder { k: usize, group: u32, members: Vec<Vec<u8>> }
+impl FecEncoder {
+    fn new(k: usize) -> Self { Self { k, group: 0, members: Vec::new() } }
+    fn push(&mut self, datagram: &[u8]) -> Option<Vec<u8>> {
+        if self.k == 0 { return None; }
+        self.members.push(datagram.to_vec());
+        // flush at the end of a frame (RTP marker bit, in the clear under SRTP) or at k
+        let end_of_frame = datagram.len() > 12 && datagram[0] >> 6 == 2 && datagram[1] & 0x80 != 0;
+        if self.members.len() < self.k && !end_of_frame { return None; }
+        let k = self.members.len();
+        let longest = self.members.iter().map(|m| m.len()).max().unwrap_or(0);
+        let mut out = Vec::with_capacity(9 + 2 * k + longest);
+        out.extend_from_slice(&FEC_MAGIC);
+        out.extend_from_slice(&self.group.to_be_bytes());
+        out.push(k as u8);
+        for m in &self.members { out.extend_from_slice(&(m.len() as u16).to_be_bytes()); }
+        let mut xor = vec![0u8; longest];
+        for m in &self.members { for (i, b) in m.iter().enumerate() { xor[i] ^= b; } }
+        out.extend_from_slice(&xor);
+        self.members.clear();
+        self.group = self.group.wrapping_add(1);
+        Some(out)
+    }
+}
+
+/// Tracks the last media datagrams seen; a repair datagram whose group is missing exactly one
+/// member yields that member. Groups are counted on the sender's sequence of media datagrams,
+/// so the receiver keeps them in arrival order and lets the repair say which group it is:
+/// the k datagrams before repair `g` are group g, in send order, minus what was lost.
+struct FecDecoder { recent: std::collections::VecDeque<Vec<u8>> }
+impl FecDecoder {
+    fn new() -> Self { Self { recent: std::collections::VecDeque::with_capacity(64) } }
+    fn is_repair(d: &[u8]) -> bool { d.len() > 9 && d[0] == FEC_MAGIC[0] && d[1] == FEC_MAGIC[1] }
+    fn saw(&mut self, d: &[u8]) {
+        if self.recent.len() >= 64 { self.recent.pop_front(); }
+        self.recent.push_back(d.to_vec());
+    }
+    fn repair(&mut self, r: &[u8]) -> Option<Vec<u8>> {
+        let k = r[6] as usize;
+        if k == 0 || r.len() < 7 + 2 * k { return None; }
+        let lens: Vec<usize> = (0..k).map(|i| u16::from_be_bytes([r[7 + 2 * i], r[8 + 2 * i]]) as usize).collect();
+        let xor = &r[7 + 2 * k..];
+        let n = self.recent.len();
+        // all k members present: the last k arrivals match the group's lengths
+        if n >= k && (0..k).all(|i| self.recent[n - k + i].len() == lens[i]) { self.recent.clear(); return None; }
+        // one member missing: the last k-1 arrivals are the group minus one position
+        if n < k - 1 { return None; }
+        let present: Vec<&Vec<u8>> = (n - (k - 1)..n).map(|i| &self.recent[i]).collect();
+        for missing in 0..k {
+            let expected: Vec<usize> = (0..k).filter(|i| *i != missing).map(|i| lens[i]).collect();
+            if present.iter().map(|d| d.len()).collect::<Vec<_>>() != expected { continue; }
+            let mut rec = xor.to_vec();
+            for d in &present { for (i, b) in d.iter().enumerate() { rec[i] ^= b; } }
+            rec.truncate(lens[missing]);
+            self.recent.clear();
+            return Some(rec);
+        }
+        None
+    }
+}
+
+#[cfg(test)]
+mod fec_tests {
+    use super::*;
+    fn rtp(seq: u8, len: usize, marker: bool) -> Vec<u8> {
+        let mut d = vec![0u8; len];
+        d[0] = 0x80; d[1] = if marker { 0x80 | 96 } else { 96 }; d[3] = seq;
+        for i in 12..len { d[i] = (i as u8).wrapping_mul(seq); }
+        d
+    }
+    #[test]
+    fn repairs_one_lost_datagram_anywhere_in_the_group() {
+        for missing in 0..4 {
+            let group: Vec<Vec<u8>> = (0..4).map(|i| rtp(i as u8 + 1, 300 + 50 * i, i == 3)).collect();
+            let mut enc = FecEncoder::new(8);
+            let mut repair = None;
+            for d in &group { if let Some(r) = enc.push(d) { repair = Some(r); } }
+            let repair = repair.expect("marker flushes the group");
+            let mut dec = FecDecoder::new();
+            for (i, d) in group.iter().enumerate() { if i != missing { dec.saw(d); } }
+            assert!(FecDecoder::is_repair(&repair));
+            assert_eq!(dec.repair(&repair), Some(group[missing].clone()), "missing {}", missing);
+        }
+    }
+    #[test]
+    fn nothing_lost_yields_nothing() {
+        let group: Vec<Vec<u8>> = (0..4).map(|i| rtp(i as u8 + 1, 400, i == 3)).collect();
+        let mut enc = FecEncoder::new(8);
+        let mut repair = None;
+        for d in &group { if let Some(r) = enc.push(d) { repair = Some(r); } }
+        let mut dec = FecDecoder::new();
+        for d in &group { dec.saw(d); }
+        assert_eq!(dec.repair(&repair.unwrap()), None);
+    }
+}
