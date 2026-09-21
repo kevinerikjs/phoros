@@ -9,6 +9,8 @@ public enum PeerEvent: Equatable {
     case disconnected
     /// The host's bandwidth estimate from TWCC feedback, bits per second.
     case bandwidth(Int)
+    /// The peer asked for a keyframe (RTCP PLI). Host only.
+    case keyframeRequested
 }
 
 /// A video frame received over RTP.
@@ -58,6 +60,7 @@ public final class RealtimePeer {
             case UInt32(PHOROS_PEER_EVENT_ICE_STATE): box.onEvent?(.iceState(Int(value)))
             case UInt32(PHOROS_PEER_EVENT_DISCONNECTED): box.onEvent?(.disconnected)
             case UInt32(PHOROS_PEER_EVENT_BANDWIDTH): box.onEvent?(.bandwidth(Int(value)))
+            case UInt32(PHOROS_PEER_EVENT_KEYFRAME_REQUEST): box.onEvent?(.keyframeRequested)
             default: break
             }
         }, { user, channel, bytes, len in

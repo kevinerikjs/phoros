@@ -56,6 +56,7 @@ public final class PhorosPeerTransport: PhorosRealtimeTransport {
                 // is::IceConnectionState: 0 new, 1 checking, 2 connected, 3 completed, 4 disconnected
                 if state == 4 { self.onLinkStateChange?(false) } else if state >= 2 { self.onLinkStateChange?(true) }
             }
+            if case .keyframeRequested = event { self.onKeyframeNeeded?() }
             if case .bandwidth(let bps) = event {
                 // TWCC says what the link carries; the encoder follows, capped by the preset.
                 let next = min(self.maximumBitrate, max(500_000, bps))

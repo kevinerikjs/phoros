@@ -32,6 +32,8 @@ pub const PHOROS_CHANNEL_REALTIME: u32 = 1;
 pub const PHOROS_CHANNEL_VIDEO: u32 = 100;
 /// `on_event` value: the host's bandwidth estimate in bits per second (TWCC).
 pub const PHOROS_PEER_EVENT_BANDWIDTH: u32 = 14;
+/// The peer asked for a keyframe (RTCP PLI/FIR). Host only.
+pub const PHOROS_PEER_EVENT_KEYFRAME_REQUEST: u32 = 15;
 
 pub const PHOROS_CODEC_H264: u32 = 0;
 pub const PHOROS_CODEC_H265: u32 = 1;
@@ -143,6 +145,14 @@ impl Inner {
                 pending.push(Pending::Data(index, data.data));
             }
             Event::MediaData(media) => {
+                // A frame after a gap that NACK/RTX did not close: the decoder's reference
+                // chain is broken, so ask the sender for a keyframe with RTCP PLI. The host
+                // sees Event::KeyframeRequest and encodes one.
+                if !media.contiguous {
+                    if let Some(rx) = self.rtc.direct_api().stream_rx_by_mid(media.mid, None) {
+                        rx.request_keyframe(str0m::media::KeyframeRequestKind::Pli);
+                    }
+                }
                 let keyframe = match media.codec_extra {
                     str0m::format::CodecExtra::H264(e) => e.is_keyframe,
                     str0m::format::CodecExtra::H265(e) => e.is_keyframe,
@@ -156,6 +166,7 @@ impl Inner {
                 buf.extend_from_slice(&media.data);
                 pending.push(Pending::Data(PHOROS_CHANNEL_VIDEO, buf));
             }
+            Event::KeyframeRequest(_) => pending.push(Pending::Event(PHOROS_PEER_EVENT_KEYFRAME_REQUEST, 0)),
             Event::EgressBitrateEstimate(kind) => {
                 self.bwe_reported = true;
                 let bps = match kind { str0m::bwe::BweKind::Twcc(b) => b.as_u64(), str0m::bwe::BweKind::Remb(_, b) => b.as_u64(), _ => return };
@@ -208,16 +219,23 @@ pub unsafe extern "C" fn phoros_peer_create(
         // NACKs go out as soon as a gap is seen (str0m's default waits up to 33 ms); the
         // interval is a phoros patch on the vendored crate. PHOROS_NACK_MS overrides.
         let nack_ms: u64 = std::env::var("PHOROS_NACK_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(5);
+        // The receive buffer waits this many frames for a repair before it gives up on a gap
+        // (str0m's default is 30, 300 ms at 100 fps). Six frames leave room for several NACK
+        // rounds on Wi-Fi and bound the stall; the PLI then fetches a keyframe.
+        let hold_back: usize = std::env::var("PHOROS_HOLD_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(6);
         let mut builder = Rtc::builder()
             .set_crypto_provider(provider)
             .set_nack_min_interval(Duration::from_millis(nack_ms))
+            .set_reordering_size_video(hold_back)
             .set_ice_lite(is_host)
             .set_local_ice_credentials(IceCreds::new())
             .clear_codecs();
         // H.264 (packetization mode 1, high profile) and H.265, each with an RTX stream, so
         // str0m packetizes the Annex B frames the encoder produces and can resend on NACK.
-        builder.codec_config().add_h264(PT_H264.into(), Some(PT_H264_RTX.into()), true, 0x64_00_1f);
-        builder.codec_config().add_h265(PT_H265.into(), Some(PT_H265_RTX.into()), 1, 0, 120);
+        // PHOROS_NO_RTX=1: no retransmission stream (experiment); a lost packet is then a gap.
+        let no_rtx = std::env::var("PHOROS_NO_RTX").map(|v| v == "1").unwrap_or(false);
+        builder.codec_config().add_h264(PT_H264.into(), if no_rtx { None } else { Some(PT_H264_RTX.into()) }, true, 0x64_00_1f);
+        builder.codec_config().add_h265(PT_H265.into(), if no_rtx { None } else { Some(PT_H265_RTX.into()) }, 1, 0, 120);
         // The bandwidth estimator is on: its estimate drives the encoder through the
         // BANDWIDTH event. Its pacer is neutered in the vendored str0m (packets leave as
         // they exist); paced at the estimate it held frames for hundreds of ms.
