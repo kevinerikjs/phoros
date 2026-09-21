@@ -464,6 +464,9 @@ pub unsafe extern "C" fn phoros_peer_run_own_socket(peer: *mut PhorosPeer) -> i3
         let start = Instant::now();
         let drop_percent: u32 = std::env::var("PHOROS_DROP").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
         let mut drop_seed: u32 = 7;
+        // PHOROS_SPREAD_US=<micros>: an experiment switch, a pause after each media-sized
+        // datagram so a frame's packets go out spaced instead of as one burst.
+        let spread_us: u64 = std::env::var("PHOROS_SPREAD_US").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
         while !stop.load(Ordering::SeqCst) {
             // drain outbound, then dispatch what the state machine produced, lock released
             let mut pending = Vec::new();
@@ -486,6 +489,9 @@ pub unsafe extern "C" fn phoros_peer_run_own_socket(peer: *mut PhorosPeer) -> i3
                             wire_delay_last.store(d, Ordering::Relaxed);
                             wire_delay_max.fetch_max(d, Ordering::Relaxed);
                         }
+                        let media_sized = inner.outbox.len() > 200;
+                        drop(inner);
+                        if spread_us > 0 && media_sized { std::thread::sleep(Duration::from_micros(spread_us)); }
                     }
                     Ok(false) => { callbacks = inner.callbacks(); break; }
                     Err(_) => return,
