@@ -92,7 +92,17 @@ public final class PhorosPeerTransport: PhorosRealtimeTransport {
     public var codec: VideoCodecID = .h264
 
     public func start() {}
-    public func cancel() { peer.destroy() }
+    /// Tears the transport down: no more acks, held frames, retries or callbacks. After a
+    /// fallback the other transport carries everything; a half-alive one must not compete.
+    public func cancel() {
+        cancelled = true
+        sendFrameAcks = false
+        onInbound = nil; onKeyframeNeeded = nil; onLinkStateChange = nil; onEnd = nil; onBitrateChange = nil
+        peer.onData = nil; peer.onVideo = nil; peer.onEvent = nil
+        queue.async { [self] in outbox.removeAll(); held.removeAll() }
+        peer.destroy()
+    }
+    private var cancelled = false
     public func setStreaming(_ enabled: Bool) {}
     public func setSendPolicy(_ policy: SendPolicy) {}
     public var acceptsVideoFrame: Bool { true }
@@ -111,6 +121,7 @@ public final class PhorosPeerTransport: PhorosRealtimeTransport {
     public var maximumQueueAge: TimeInterval = 0.1
 
     private func send(_ tag: Tag, _ payload: Data, realtime: Bool) {
+        guard !cancelled else { return }
         var message = Data([tag.rawValue])
         message.append(payload)
         queue.async { [self] in
@@ -150,6 +161,7 @@ public final class PhorosPeerTransport: PhorosRealtimeTransport {
     }
 
     public func sendVideo(_ annexB: Data, presentationTimestamp: Int64, isKeyframe: Bool) {
+        guard !cancelled else { return }
         guard ackClocked else { sendVideoNow(annexB, presentationTimestamp: presentationTimestamp, isKeyframe: isKeyframe); return }
         queue.async { [self] in
             held.append((annexB, presentationTimestamp, isKeyframe))

@@ -500,7 +500,11 @@ pub unsafe extern "C" fn phoros_peer_run_own_socket(peer: *mut PhorosPeer) -> i3
         let fec_k: usize = std::env::var("PHOROS_FEC").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
         let mut fec = FecEncoder::new(fec_k);
         let mut fec_rx = FecDecoder::new();
+        // PHOROS_STOP_AFTER_MS=<ms>: a harness switch, the socket loop stops after that
+        // long, simulating an interrupted transport, to exercise the fallback to TCP.
+        let die_after: Option<Duration> = std::env::var("PHOROS_STOP_AFTER_MS").ok().and_then(|v| v.parse().ok()).map(Duration::from_millis);
         while !stop.load(Ordering::SeqCst) {
+            if let Some(d) = die_after { if start.elapsed() > d { return; } }
             // delayed datagrams whose time has come
             while let Some((at, _, _)) = delayed.front() {
                 if *at > Instant::now() { break; }
