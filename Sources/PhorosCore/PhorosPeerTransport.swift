@@ -1,0 +1,344 @@
+import Foundation
+import Phoros
+import PhorosSession
+
+public enum PeerTransportEnd: Error { case disconnected }
+
+/// `PhorosRealtimeTransport` over a `RealtimePeer`: video, audio and input on the realtime
+/// data channel (unordered, 50 ms lifetime, no head-of-line blocking between frames),
+/// control and parameter sets on the reliable one. Frames larger than the channel's message
+/// limit are fragmented with the v1 `VideoFragmentHeader` and reassembled by the v1
+/// `FrameAssembler`, which tolerates any order.
+///
+/// This is the BEAM-54 spike: the same seam the TCP transport implements, so the harness
+/// compares the two on one table. RTP media is the next step; SCTP messages are enough to
+/// measure what UDP, DTLS and partial reliability do to the loop.
+public final class PhorosPeerTransport: PhorosRealtimeTransport {
+    public var onInbound: ((RealtimeInbound) -> Void)?
+    public var onReady: (() -> Void)?
+    public var onEnd: ((Error) -> Void)?
+    /// The ICE link came up (true) or went away (false). str0m keeps the peer alive through
+    /// a stall and reconnects on its own; the host moves media to the fallback meanwhile.
+    public var onLinkStateChange: ((Bool) -> Void)?
+    public var onKeyframeNeeded: (() -> Void)?
+    public var onBitrateChange: ((Int) -> Void)?
+    public var onTrace: ((RealtimeTrace) -> Void)?
+    public private(set) var metrics = RealtimeMetrics()
+
+    public let peer: RealtimePeer
+    private let queue: DispatchQueue
+    private var assembler = FrameAssembler()
+    private var frameNumber: UInt32 = 0
+    private var audioSequence: UInt32 = 0
+    private var ready = false
+    /// Largest message on the realtime channel. SCTP's default remote limit is 64 KB;
+    /// stay under it with room for the tag and header.
+    public var maximumMessageLength = 48 * 1024
+
+    private enum Tag: UInt8 { case video = 1, parameterSets = 2, control = 3, input = 4, audio = 5, frameAck = 6 }
+
+    /// Experiment: ack clocking. The receiver acknowledges every assembled frame on the
+    /// realtime channel; a host with `ackClocked` holds the next frame until the previous one
+    /// is acknowledged (or 40 ms pass), so the wire carries TCP's request-reply shape.
+    public var ackClocked = false
+    /// Frames allowed in flight before the host holds the next one (ack clocking).
+    public var ackWindow: UInt32 = 1
+    public var sendFrameAcks = true
+
+    /// The sender's media clock, microseconds, as last seen: from the transport offer, then
+    /// from every audio chunk. Video arrives with its timestamp reduced to 32 bits of 90 kHz
+    /// RTP ticks (a 13 h cycle); `unwrap` puts it back on the sender's full timeline, next to
+    /// this reference, so the receiver can place audio against video. Without a reference
+    /// frames keep the reduced timestamp, as before 1.4.2.
+    public var hostTimeReference: Int64?
+    private static let rtpCycleMicros = Double(1 << 32) * 100 / 9
+    private func unwrap(_ reducedMicros: Int64) -> Int64 {
+        guard let reference = hostTimeReference else { return reducedMicros }
+        let cycles = ((Double(reference - reducedMicros)) / Self.rtpCycleMicros).rounded()
+        return reducedMicros + Int64(cycles * Self.rtpCycleMicros)
+    }
+    private var lastAckedFrame: UInt32 = 0
+    private var lastAckAt = Date()
+    private var lastSendAt = Date.distantPast
+    /// Host-side liveness: frames have gone out on this transport and none was acknowledged
+    /// for `threshold`. A link that died without ICE noticing shows up here; the host then
+    /// moves media back to its other transport.
+    public func isStalled(threshold: TimeInterval) -> Bool {
+        // something sent since the last ack, and that ack is older than the threshold
+        guard lastSendAt > lastAckAt else { return false }
+        return Date().timeIntervalSince(lastAckAt) > threshold
+    }
+    private var heldSince = Date()
+
+    public init(peer: RealtimePeer, queue: DispatchQueue = DispatchQueue(label: "phoros.peer.transport", qos: .userInteractive)) {
+        self.peer = peer
+        self.queue = queue
+        peer.onData = { [weak self] channel, bytes in self?.handle(Data(bytes)) }
+        peer.onVideo = { [weak self] frame in
+            guard let self else { return }
+            let number = self.receivedFrames
+            self.receivedFrames &+= 1
+            if self.sendFrameAcks { self.send(.frameAck, Data([UInt8(number >> 24), UInt8((number >> 16) & 0xff), UInt8((number >> 8) & 0xff), UInt8(number & 0xff)]), realtime: true) }
+            if !frame.contiguous { self.onKeyframeNeeded?() }
+            self.onInbound?(.video(AssembledFrame(frameNumber: number, presentationTimestamp: self.unwrap(frame.presentationTimestamp), isKeyframe: frame.isKeyframe, bitstream: frame.annexB)))
+        }
+        peer.onEvent = { [weak self] event in
+            guard let self else { return }
+            if case .connected = event, !self.ready { self.ready = true; self.lastAckAt = Date(); self.onReady?() }
+            if case .disconnected = event { self.onEnd?(PeerTransportEnd.disconnected) }
+            if case .iceState(let state) = event {
+                // is::IceConnectionState: 0 new, 1 checking, 2 connected, 3 completed, 4 disconnected
+                if state == 4 { self.onLinkStateChange?(false) } else if state >= 2 { self.onLinkStateChange?(true) }
+            }
+            if case .keyframeRequested = event { self.onKeyframeNeeded?() }
+            if case .bandwidth(let bps) = event {
+                // TWCC says what the link carries; the encoder follows, capped by the preset.
+                let next = min(self.maximumBitrate, max(500_000, bps))
+                if next != self.metrics.bitrate { self.metrics.bitrate = next; self.onBitrateChange?(next) }
+            }
+        }
+    }
+    private var receivedFrames: UInt32 = 0
+    private var maximumBitrate = Int.max
+    /// RTP video, or the data channels (the first spike). RTP is the path.
+    public var videoOverRTP = true
+    public var codec: VideoCodecID = .h264
+
+    public func start() {}
+    /// Tears the transport down: no more acks, held frames, retries or callbacks. After a
+    /// fallback the other transport carries everything; a half-alive one must not compete.
+    public func cancel() {
+        cancelled = true
+        sendFrameAcks = false
+        onInbound = nil; onKeyframeNeeded = nil; onLinkStateChange = nil; onEnd = nil; onBitrateChange = nil
+        peer.onData = nil; peer.onVideo = nil; peer.onEvent = nil
+        queue.async { [self] in outbox.removeAll(); held.removeAll() }
+        peer.destroy()
+    }
+    private var cancelled = false
+    public func setStreaming(_ enabled: Bool) {}
+    public func setSendPolicy(_ policy: SendPolicy) {}
+    public var acceptsVideoFrame: Bool { true }
+    public func setMaximumBitrate(_ bitsPerSecond: Int) {
+        maximumBitrate = bitsPerSecond
+        peer.setDesiredBitrate(bitsPerSecond)
+        onBitrateChange?(min(bitsPerSecond, max(metrics.bitrate, 500_000)))
+    }
+    public func dropQueuedVideo() {}
+
+    /// Messages the association's send buffer could not take yet, oldest first, with the
+    /// time they were queued. Realtime messages older than `maximumQueueAge` are dropped
+    /// unsent; reliable ones wait.
+    private var outbox: [(channel: Int, message: Data, at: Date)] = []
+    private var retryScheduled = false
+    public var maximumQueueAge: TimeInterval = 0.1
+
+    // MARK: Audio reordering (queue only)
+
+    /// The audio lane is unordered, so a chunk can overtake the one before it. Receivers
+    /// expect audio in sequence (Beam's guard drops a step backwards as a duplicate), so a
+    /// chunk that arrives ahead of a gap waits here up to `audioReorderHold` for the missing
+    /// one, then everything held goes out in order and the gap is given up on.
+    public var audioReorderHold: TimeInterval = 0.03
+    private var nextAudioSequence: UInt32?
+    private var heldAudio: [UInt32: (AudioChunkHeader, Data, AudioCodecID)] = [:]
+    private var audioReorderTimer: DispatchWorkItem?
+
+    private func reorderAudio(_ header: AudioChunkHeader, _ body: Data, codec: AudioCodecID) {
+        guard let next = nextAudioSequence else {
+            nextAudioSequence = header.sequenceNumber &+ 1
+            onInbound?(.audio(header, body, codec: codec))
+            return
+        }
+        let ahead = header.sequenceNumber &- next
+        if ahead == 0 {
+            deliverAudio(header, body, codec: codec)
+            releaseHeldAudioInOrder()
+        } else if ahead < 64 {
+            heldAudio[header.sequenceNumber] = (header, body, codec)
+            if audioReorderTimer == nil {
+                let item = DispatchWorkItem { [weak self] in
+                    guard let self else { return }
+                    self.audioReorderTimer = nil
+                    // the gap did not fill in time: skip to the oldest held chunk
+                    if let oldest = self.heldAudio.keys.min(by: { ($0 &- next) < ($1 &- next) }) { self.nextAudioSequence = oldest }
+                    self.releaseHeldAudioInOrder()
+                }
+                audioReorderTimer = item
+                queue.asyncAfter(deadline: .now() + audioReorderHold, execute: item)
+            }
+        } else {
+            // far behind (a late straggler) or a restart: pass it through, the guard decides
+            onInbound?(.audio(header, body, codec: codec))
+            if ahead > UInt32.max / 2 { return }
+            nextAudioSequence = header.sequenceNumber &+ 1
+        }
+    }
+
+    private func deliverAudio(_ header: AudioChunkHeader, _ body: Data, codec: AudioCodecID) {
+        nextAudioSequence = header.sequenceNumber &+ 1
+        onInbound?(.audio(header, body, codec: codec))
+    }
+
+    private func releaseHeldAudioInOrder() {
+        while let next = nextAudioSequence, let (header, body, codec) = heldAudio.removeValue(forKey: next) {
+            deliverAudio(header, body, codec: codec)
+        }
+        if heldAudio.isEmpty { audioReorderTimer?.cancel(); audioReorderTimer = nil }
+    }
+
+    /// Core channel ids: 0 reliable and ordered, 1 realtime (50 ms lifetime), 2 audio (400 ms).
+    private enum Lane: Int { case reliable = 0, realtime = 1, audio = 2 }
+    /// Audio waits in the outbox up to this long: the receiver holds a few hundred ms of it.
+    public var maximumAudioQueueAge: TimeInterval = 0.4
+
+    private func send(_ tag: Tag, _ payload: Data, realtime: Bool) {
+        send(tag, payload, lane: realtime ? .realtime : .reliable)
+    }
+
+    private func send(_ tag: Tag, _ payload: Data, lane: Lane) {
+        guard !cancelled else { return }
+        var message = Data([tag.rawValue])
+        message.append(payload)
+        queue.async { [self] in
+            outbox.append((lane.rawValue, message, Date()))
+            flush()
+        }
+    }
+
+    /// Queue only. Writes what the association takes, keeps the rest for a retry.
+    private func flush() {
+        while let next = outbox.first {
+            if next.channel == Lane.realtime.rawValue, Date().timeIntervalSince(next.at) > maximumQueueAge {
+                outbox.removeFirst()
+                metrics.droppedVideoFrames += 1
+                continue
+            }
+            if next.channel == Lane.audio.rawValue, Date().timeIntervalSince(next.at) > maximumAudioQueueAge {
+                outbox.removeFirst()
+                continue
+            }
+            let status = peer.send(channel: next.channel, next.message)
+            if status == 0 { outbox.removeFirst(); continue }
+            if status == CoreError.busy.rawValue { break }
+            outbox.removeFirst()   // any other error: the message is not going to go
+        }
+        if !outbox.isEmpty, !retryScheduled {
+            retryScheduled = true
+            queue.asyncAfter(deadline: .now() + .milliseconds(1)) { [weak self] in
+                guard let self else { return }
+                self.retryScheduled = false
+                self.flush()
+            }
+        }
+    }
+
+    public func sendVideoParameterSets(_ data: Data, codec: VideoCodecID) {
+        self.codec = codec
+        var payload = Data([codec.packetFlags])
+        payload.append(data)
+        send(.parameterSets, payload, realtime: false)
+    }
+
+    public func sendVideo(_ annexB: Data, presentationTimestamp: Int64, isKeyframe: Bool) {
+        guard !cancelled else { return }
+        guard ackClocked else { sendVideoNow(annexB, presentationTimestamp: presentationTimestamp, isKeyframe: isKeyframe); return }
+        queue.async { [self] in
+            held.append((annexB, presentationTimestamp, isKeyframe))
+            if held.count == 1 { heldSince = Date() }
+            releaseHeld()
+        }
+    }
+
+    private var held: [(Data, Int64, Bool)] = []
+    /// Sends held frames while the window allows it; after 40 ms without an ack, sends them all
+    /// (an ack lost on the realtime channel must not stall the stream).
+    private func releaseHeld() {
+        while let (data, pts, key) = held.first {
+            let outstanding = frameNumber > ackWindow && lastAckedFrame + ackWindow < frameNumber
+            if outstanding && Date().timeIntervalSince(heldSince) < 0.04 {
+                queue.asyncAfter(deadline: .now() + .milliseconds(2)) { [weak self] in self?.releaseHeld() }
+                return
+            }
+            held.removeFirst()
+            sendVideoNow(data, presentationTimestamp: pts, isKeyframe: key)
+        }
+    }
+
+    private func sendVideoNow(_ annexB: Data, presentationTimestamp: Int64, isKeyframe: Bool) {
+        lastSendAt = Date()
+        let number = frameNumber
+        frameNumber &+= 1
+        onTrace?(.videoQueued(frame: number, presentationTimestamp: presentationTimestamp, bytes: annexB.count))
+        if videoOverRTP {
+            let status = peer.sendVideo(annexB, presentationTimestamp: presentationTimestamp, codec: codec == .hevc ? 1 : 0, isKeyframe: isKeyframe)
+            if status != 0 { metrics.droppedVideoFrames += 1; if !isKeyframe { onKeyframeNeeded?() } }
+            onTrace?(.videoHandedToLink(frame: number, linkBacklog: 0))
+            return
+        }
+        // A keyframe goes on the reliable channel: it is the frame every later one depends
+        // on, and a 300 KB keyframe in 48 KB messages with a 50 ms lifetime loses a fragment
+        // whenever the association's window is small. Deltas go realtime: a late one is worth
+        // nothing, and the next keyframe repairs the chain.
+        for fragment in VideoFragmentHeader.fragment(annexB, frameNumber: number, presentationTimestamp: presentationTimestamp, maximumPayloadLength: maximumMessageLength) {
+            var payload = Data([isKeyframe ? 1 : 0])
+            payload.append(fragment)
+            send(.video, payload, realtime: !isKeyframe)
+        }
+        onTrace?(.videoHandedToLink(frame: number, linkBacklog: 0))
+    }
+
+    public func sendAudio(_ accessUnit: Data, codec: AudioCodecID, presentationTimestamp: Int64) {
+        let sequence = audioSequence
+        audioSequence &+= 1
+        var payload = Data([codec.packetFlags])
+        payload.append(AudioChunkHeader(sequenceNumber: sequence, presentationTimestamp: presentationTimestamp).serialized())
+        payload.append(accessUnit)
+        send(.audio, payload, lane: .audio)
+    }
+
+    public func sendInput(_ report: ControllerReport, connected: Bool) {
+        var payload = Data([connected ? ControllerReport.connectedFlag : 0])
+        payload.append(report.serialized())
+        send(.input, payload, realtime: true)
+    }
+
+    public func sendControl(_ message: ControlMessage) {
+        guard let json = try? JSONEncoder().encode(message) else { return }
+        send(.control, json, realtime: false)
+    }
+
+    public func sendMessage(_ json: Data) { send(.control, json, realtime: false) }
+
+    private func handle(_ message: Data) {
+        guard let tag = message.first.flatMap(Tag.init(rawValue:)) else { return }
+        let body = message.dropFirst()
+        switch tag {
+        case .video:
+            guard let flag = body.first else { return }
+            if let frame = assembler.receive(Data(body.dropFirst()), isKeyframe: flag != 0) { onInbound?(.video(frame)) }
+        case .parameterSets:
+            guard let flag = body.first, let codec = VideoCodecID(packetFlags: flag) else { return }
+            onInbound?(.videoParameterSets(Data(body.dropFirst()), codec: codec))
+        case .audio:
+            guard let flag = body.first, let codec = AudioCodecID(packetFlags: flag),
+                  let header = AudioChunkHeader.parse(from: Data(body.dropFirst())) else { return }
+            hostTimeReference = header.presentationTimestamp   // audio carries the full timestamp
+            queue.async { self.reorderAudio(header, Data(body.dropFirst(1 + AudioChunkHeader.size)), codec: codec) }
+        case .input:
+            guard let flag = body.first, let report = ControllerReport.parse(from: Data(body.dropFirst())) else { return }
+            onInbound?(.input(report, connected: flag & ControllerReport.connectedFlag != 0))
+        case .frameAck:
+            let b = Array(body); guard b.count >= 4 else { return }
+            let acked = UInt32(b[0]) << 24 | UInt32(b[1]) << 16 | UInt32(b[2]) << 8 | UInt32(b[3])
+            queue.async { [self] in
+                if acked >= lastAckedFrame { lastAckedFrame = acked; lastAckAt = Date() }
+                releaseHeld()
+            }
+        case .control:
+            let json = Data(body)
+            if let control = try? JSONDecoder().decode(ControlMessage.self, from: json) { onInbound?(.control(control)) }
+            else { onInbound?(.message(json)) }
+        }
+    }
+}

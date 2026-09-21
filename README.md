@@ -39,6 +39,7 @@ Screen mirroring is one use, not the definition. Phoros ships inside [Beam](http
 | **`PhorosNetwork`** | The transport: the v1 TCP wire behind the seam, or one call for a framed, size-bounded connection over `Network.framework`. | `Phoros`, `PhorosSession`, Network |
 | **`PhorosMedia`** | The codecs, shaped for the wire: H.264/HEVC via VideoToolbox, AAC-LC via AudioToolbox, parameter sets, Annex B, sample buffers. | `Phoros`, VideoToolbox, AudioToolbox |
 | **`PhorosInput`** | Input back to the host: controller sampling, a virtual HID gamepad, keyboard, text, media-key and click replay, and tap-to-source geometry. | `Phoros`, GameController, IOKit, CoreGraphics |
+| **`PhorosCore`** | Phoros 2: the realtime peer (UDP, ICE, DTLS, RTP with RTX and FEC, SCTP lanes) from a Rust core shipped as an XCFramework, and `PhorosPeerTransport` on top of it. Offered by a host over the base transport, with automatic fallback. | `Phoros`, `PhorosSession`, the core |
 
 ## Why
 
@@ -54,7 +55,7 @@ Phoros is the third option with the production lessons already applied. You brin
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/kevinerikjs/phoros.git", exact: "1.4.1")
+    .package(url: "https://github.com/kevinerikjs/phoros.git", exact: "1.4.2")
 ],
 targets: [
     .target(name: "MyHost", dependencies: [

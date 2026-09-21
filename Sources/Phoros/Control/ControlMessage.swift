@@ -28,6 +28,21 @@ public enum ControlMessage: Equatable, Sendable {
     /// and the host's receive and send times added.
     case clockReply(ClockReply)
 
+    /// Host to client. The host can carry media over a second transport and
+    /// offers it: what kind, where to reach it, and the credentials the
+    /// transport needs. A client that does not know the kind ignores the
+    /// offer and keeps this connection. Experimental in 1.4.0 (Phoros 2
+    /// bring-up); the shape may change before it is documented as stable.
+    case transportOffer(TransportOffer)
+
+    /// Client to host. The client's side of a `transportOffer` it accepted.
+    case transportAnswer(TransportOffer)
+
+    /// Either way. The second transport is being abandoned: media and input are back on
+    /// this connection from now on. A host sends it when its watchdog sees frames go
+    /// unacknowledged, a client when its side of the transport fails. Since 1.4.2.
+    case transportFallback
+
     /// Client to host. Start sending media.
     case streamRequest
 
@@ -254,6 +269,29 @@ public struct Click: Codable, Equatable, Sendable {
     }
 }
 
+/// One side of a second media transport. `kind` names the transport
+/// ("rtc2": ICE, DTLS and SCTP over UDP), `address` is "ip:port" where this
+/// side listens, `info` is what the transport needs from the other side, in
+/// its own format (for rtc2: ICE ufrag, ICE password and DTLS fingerprint,
+/// newline separated).
+public struct TransportOffer: Codable, Equatable, Sendable {
+    public var kind: String
+    public var address: String
+    public var info: String
+    /// The offering host's media clock at the time of the offer, in microseconds (1.4.2,
+    /// optional). RTP carries a presentation timestamp as 32 bits of 90 kHz ticks, which wraps
+    /// every 13 hours, so a receiver needs one reading of the host's clock to put frames back
+    /// on the full timeline that audio chunks and clock probes use. Absent from older hosts.
+    public var hostMicros: Int64?
+
+    public init(kind: String, address: String, info: String, hostMicros: Int64? = nil) {
+        self.kind = kind
+        self.address = address
+        self.info = info
+        self.hostMicros = hostMicros
+    }
+}
+
 /// A clock probe: one sample for estimating the offset between two peers'
 /// clocks, as in NTP. Times are microseconds of each peer's own monotonic
 /// clock, the same clock as video presentation timestamps.
@@ -313,6 +351,9 @@ extension ControlMessage {
         case mediaKey = "media_key"
         case clockProbe = "clock_probe"
         case clockReply = "clock_reply"
+        case transportOffer = "transport_offer"
+        case transportAnswer = "transport_answer"
+        case transportFallback = "transport_fallback"
     }
 
     public var kind: Kind {
@@ -337,6 +378,9 @@ extension ControlMessage {
         case .mediaKey: return .mediaKey
         case .clockProbe: return .clockProbe
         case .clockReply: return .clockReply
+        case .transportOffer: return .transportOffer
+        case .transportAnswer: return .transportAnswer
+        case .transportFallback: return .transportFallback
         }
     }
 }
@@ -387,6 +431,9 @@ extension ControlMessage: Codable {
         case .mediaKey: self = .mediaKey(try payload(MediaKeyCommand.self))
         case .clockProbe: self = .clockProbe(try payload(ClockProbe.self))
         case .clockReply: self = .clockReply(try payload(ClockReply.self))
+        case .transportOffer: self = .transportOffer(try payload(TransportOffer.self))
+        case .transportAnswer: self = .transportAnswer(try payload(TransportOffer.self))
+        case .transportFallback: self = .transportFallback
         }
     }
 
@@ -395,7 +442,7 @@ extension ControlMessage: Codable {
         try container.encode(kind, forKey: .type)
 
         switch self {
-        case .ping, .pong, .streamRequest, .streamStop, .videoPause, .videoResume, .windowListRequest:
+        case .ping, .pong, .streamRequest, .streamStop, .videoPause, .videoResume, .windowListRequest, .transportFallback:
             break
         case .qualityFeedback(let quality):
             try container.encode(QualityValue(quality: quality), forKey: .payload)
@@ -419,6 +466,8 @@ extension ControlMessage: Codable {
             try container.encode(probe, forKey: .payload)
         case .clockReply(let reply):
             try container.encode(reply, forKey: .payload)
+        case .transportOffer(let offer), .transportAnswer(let offer):
+            try container.encode(offer, forKey: .payload)
         case .mediaKey(let command):
             try container.encode(command, forKey: .payload)
         }
