@@ -38,6 +38,11 @@ public enum ControlMessage: Equatable, Sendable {
     /// Client to host. The client's side of a `transportOffer` it accepted.
     case transportAnswer(TransportOffer)
 
+    /// Either way. The second transport is being abandoned: media and input are back on
+    /// this connection from now on. A host sends it when its watchdog sees frames go
+    /// unacknowledged, a client when its side of the transport fails. Since 1.4.2.
+    case transportFallback
+
     /// Client to host. Start sending media.
     case streamRequest
 
@@ -342,6 +347,7 @@ extension ControlMessage {
         case clockReply = "clock_reply"
         case transportOffer = "transport_offer"
         case transportAnswer = "transport_answer"
+        case transportFallback = "transport_fallback"
     }
 
     public var kind: Kind {
@@ -368,6 +374,7 @@ extension ControlMessage {
         case .clockReply: return .clockReply
         case .transportOffer: return .transportOffer
         case .transportAnswer: return .transportAnswer
+        case .transportFallback: return .transportFallback
         }
     }
 }
@@ -420,6 +427,7 @@ extension ControlMessage: Codable {
         case .clockReply: self = .clockReply(try payload(ClockReply.self))
         case .transportOffer: self = .transportOffer(try payload(TransportOffer.self))
         case .transportAnswer: self = .transportAnswer(try payload(TransportOffer.self))
+        case .transportFallback: self = .transportFallback
         }
     }
 
@@ -428,7 +436,7 @@ extension ControlMessage: Codable {
         try container.encode(kind, forKey: .type)
 
         switch self {
-        case .ping, .pong, .streamRequest, .streamStop, .videoPause, .videoResume, .windowListRequest:
+        case .ping, .pong, .streamRequest, .streamStop, .videoPause, .videoResume, .windowListRequest, .transportFallback:
             break
         case .qualityFeedback(let quality):
             try container.encode(QualityValue(quality: quality), forKey: .payload)

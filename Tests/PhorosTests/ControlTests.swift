@@ -47,6 +47,7 @@ final class ControlTests: XCTestCase {
          #"{"type":"transport_offer","payload":{"kind":"rtc2","address":"192.168.1.2:40000","info":"u\np\nab"}}"#),
         (.transportAnswer(TransportOffer(kind: "rtc2", address: "192.168.1.3:40001", info: "v\nq\ncd")),
          #"{"type":"transport_answer","payload":{"kind":"rtc2","address":"192.168.1.3:40001","info":"v\nq\ncd"}}"#),
+        (.transportFallback, #"{"type":"transport_fallback"}"#),
     ]
 
     func testEveryMessageDecodesFromItsShippedJSON() throws {
@@ -75,7 +76,7 @@ final class ControlTests: XCTestCase {
             "window_list_request", "window_list", "window_select_request", "capture_mode_changed",
             "media_key",
             "clock_probe", "clock_reply",
-            "transport_offer", "transport_answer",
+            "transport_offer", "transport_answer", "transport_fallback",
         ])
     }
 

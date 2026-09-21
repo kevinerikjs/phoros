@@ -45,6 +45,16 @@ public final class PhorosPeerTransport: PhorosRealtimeTransport {
     public var ackWindow: UInt32 = 1
     public var sendFrameAcks = true
     private var lastAckedFrame: UInt32 = 0
+    private var lastAckAt = Date()
+    private var lastSendAt = Date.distantPast
+    /// Host-side liveness: frames have gone out on this transport and none was acknowledged
+    /// for `threshold`. A link that died without ICE noticing shows up here; the host then
+    /// moves media back to its other transport.
+    public func isStalled(threshold: TimeInterval) -> Bool {
+        // something sent since the last ack, and that ack is older than the threshold
+        guard lastSendAt > lastAckAt else { return false }
+        return Date().timeIntervalSince(lastAckAt) > threshold
+    }
     private var heldSince = Date()
 
     public init(peer: RealtimePeer, queue: DispatchQueue = DispatchQueue(label: "phoros.peer.transport", qos: .userInteractive)) {
@@ -61,7 +71,7 @@ public final class PhorosPeerTransport: PhorosRealtimeTransport {
         }
         peer.onEvent = { [weak self] event in
             guard let self else { return }
-            if case .connected = event, !self.ready { self.ready = true; self.onReady?() }
+            if case .connected = event, !self.ready { self.ready = true; self.lastAckAt = Date(); self.onReady?() }
             if case .disconnected = event { self.onEnd?(PeerTransportEnd.disconnected) }
             if case .iceState(let state) = event {
                 // is::IceConnectionState: 0 new, 1 checking, 2 connected, 3 completed, 4 disconnected
@@ -164,6 +174,7 @@ public final class PhorosPeerTransport: PhorosRealtimeTransport {
     }
 
     private func sendVideoNow(_ annexB: Data, presentationTimestamp: Int64, isKeyframe: Bool) {
+        lastSendAt = Date()
         let number = frameNumber
         frameNumber &+= 1
         onTrace?(.videoQueued(frame: number, presentationTimestamp: presentationTimestamp, bytes: annexB.count))
@@ -228,7 +239,7 @@ public final class PhorosPeerTransport: PhorosRealtimeTransport {
             let b = Array(body); guard b.count >= 4 else { return }
             let acked = UInt32(b[0]) << 24 | UInt32(b[1]) << 16 | UInt32(b[2]) << 8 | UInt32(b[3])
             queue.async { [self] in
-                if acked >= lastAckedFrame { lastAckedFrame = acked }
+                if acked >= lastAckedFrame { lastAckedFrame = acked; lastAckAt = Date() }
                 releaseHeld()
             }
         case .control:

@@ -497,7 +497,7 @@ pub unsafe extern "C" fn phoros_peer_run_own_socket(peer: *mut PhorosPeer) -> i3
         // PHOROS_FEC=<k>: after every k media datagrams a repair datagram carrying their XOR
         // (datagram-level, protocol-agnostic: the receiver rebuilds one lost datagram of the
         // group without a round trip and feeds it to the state machine as if it had arrived).
-        let fec_k: usize = std::env::var("PHOROS_FEC").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+        let fec_k: usize = std::env::var("PHOROS_FEC").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
         let mut fec = FecEncoder::new(fec_k);
         let mut fec_rx = FecDecoder::new();
         while !stop.load(Ordering::SeqCst) {
