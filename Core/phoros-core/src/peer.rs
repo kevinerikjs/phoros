@@ -223,8 +223,13 @@ pub unsafe extern "C" fn phoros_peer_create(
         // (str0m's default is 30, 300 ms at 100 fps). Six frames leave room for several NACK
         // rounds on Wi-Fi and bound the stall; the PLI then fetches a keyframe.
         let hold_back: usize = std::env::var("PHOROS_HOLD_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(6);
+        // Datagram target: str0m's 1150 is sized for the public internet; on a LAN 1400 fits
+        // a 1500 MTU and sends ~18% fewer packets for the same bitrate, which is what the
+        // phone's Wi-Fi taxes. PHOROS_MTU overrides.
+        let mtu: usize = std::env::var("PHOROS_MTU").ok().and_then(|v| v.parse().ok()).unwrap_or(1400);
         let mut builder = Rtc::builder()
             .set_crypto_provider(provider)
+            .set_mtu(mtu..=1500)
             .set_nack_min_interval(Duration::from_millis(nack_ms))
             .set_reordering_size_video(hold_back)
             .set_ice_lite(is_host)

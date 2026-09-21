@@ -35,7 +35,17 @@ public final class PhorosPeerTransport: PhorosRealtimeTransport {
     /// stay under it with room for the tag and header.
     public var maximumMessageLength = 48 * 1024
 
-    private enum Tag: UInt8 { case video = 1, parameterSets = 2, control = 3, input = 4, audio = 5 }
+    private enum Tag: UInt8 { case video = 1, parameterSets = 2, control = 3, input = 4, audio = 5, frameAck = 6 }
+
+    /// Experiment: ack clocking. The receiver acknowledges every assembled frame on the
+    /// realtime channel; a host with `ackClocked` holds the next frame until the previous one
+    /// is acknowledged (or 40 ms pass), so the wire carries TCP's request-reply shape.
+    public var ackClocked = false
+    /// Frames allowed in flight before the host holds the next one (ack clocking).
+    public var ackWindow: UInt32 = 1
+    public var sendFrameAcks = true
+    private var lastAckedFrame: UInt32 = 0
+    private var heldSince = Date()
 
     public init(peer: RealtimePeer, queue: DispatchQueue = DispatchQueue(label: "phoros.peer.transport", qos: .userInteractive)) {
         self.peer = peer
@@ -45,6 +55,7 @@ public final class PhorosPeerTransport: PhorosRealtimeTransport {
             guard let self else { return }
             let number = self.receivedFrames
             self.receivedFrames &+= 1
+            if self.sendFrameAcks { self.send(.frameAck, Data([UInt8(number >> 24), UInt8((number >> 16) & 0xff), UInt8((number >> 8) & 0xff), UInt8(number & 0xff)]), realtime: true) }
             if !frame.contiguous { self.onKeyframeNeeded?() }
             self.onInbound?(.video(AssembledFrame(frameNumber: number, presentationTimestamp: frame.presentationTimestamp, isKeyframe: frame.isKeyframe, bitstream: frame.annexB)))
         }
@@ -129,6 +140,30 @@ public final class PhorosPeerTransport: PhorosRealtimeTransport {
     }
 
     public func sendVideo(_ annexB: Data, presentationTimestamp: Int64, isKeyframe: Bool) {
+        guard ackClocked else { sendVideoNow(annexB, presentationTimestamp: presentationTimestamp, isKeyframe: isKeyframe); return }
+        queue.async { [self] in
+            held.append((annexB, presentationTimestamp, isKeyframe))
+            if held.count == 1 { heldSince = Date() }
+            releaseHeld()
+        }
+    }
+
+    private var held: [(Data, Int64, Bool)] = []
+    /// Sends held frames while the window allows it; after 40 ms without an ack, sends them all
+    /// (an ack lost on the realtime channel must not stall the stream).
+    private func releaseHeld() {
+        while let (data, pts, key) = held.first {
+            let outstanding = frameNumber > ackWindow && lastAckedFrame + ackWindow < frameNumber
+            if outstanding && Date().timeIntervalSince(heldSince) < 0.04 {
+                queue.asyncAfter(deadline: .now() + .milliseconds(2)) { [weak self] in self?.releaseHeld() }
+                return
+            }
+            held.removeFirst()
+            sendVideoNow(data, presentationTimestamp: pts, isKeyframe: key)
+        }
+    }
+
+    private func sendVideoNow(_ annexB: Data, presentationTimestamp: Int64, isKeyframe: Bool) {
         let number = frameNumber
         frameNumber &+= 1
         onTrace?(.videoQueued(frame: number, presentationTimestamp: presentationTimestamp, bytes: annexB.count))
@@ -189,6 +224,13 @@ public final class PhorosPeerTransport: PhorosRealtimeTransport {
         case .input:
             guard let flag = body.first, let report = ControllerReport.parse(from: Data(body.dropFirst())) else { return }
             onInbound?(.input(report, connected: flag & ControllerReport.connectedFlag != 0))
+        case .frameAck:
+            let b = Array(body); guard b.count >= 4 else { return }
+            let acked = UInt32(b[0]) << 24 | UInt32(b[1]) << 16 | UInt32(b[2]) << 8 | UInt32(b[3])
+            queue.async { [self] in
+                if acked >= lastAckedFrame { lastAckedFrame = acked }
+                releaseHeld()
+            }
         case .control:
             let json = Data(body)
             if let control = try? JSONDecoder().decode(ControlMessage.self, from: json) { onInbound?(.control(control)) }
