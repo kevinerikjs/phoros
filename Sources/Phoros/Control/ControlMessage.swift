@@ -278,11 +278,17 @@ public struct TransportOffer: Codable, Equatable, Sendable {
     public var kind: String
     public var address: String
     public var info: String
+    /// The offering host's media clock at the time of the offer, in microseconds (1.4.2,
+    /// optional). RTP carries a presentation timestamp as 32 bits of 90 kHz ticks, which wraps
+    /// every 13 hours, so a receiver needs one reading of the host's clock to put frames back
+    /// on the full timeline that audio chunks and clock probes use. Absent from older hosts.
+    public var hostMicros: Int64?
 
-    public init(kind: String, address: String, info: String) {
+    public init(kind: String, address: String, info: String, hostMicros: Int64? = nil) {
         self.kind = kind
         self.address = address
         self.info = info
+        self.hostMicros = hostMicros
     }
 }
 

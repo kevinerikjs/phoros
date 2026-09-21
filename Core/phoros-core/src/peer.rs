@@ -323,15 +323,15 @@ pub unsafe extern "C" fn phoros_peer_set_remote(peer: *mut PhorosPeer, info: *co
             api.set_remote_fingerprint(str0m::config::Fingerprint { hash_func: "sha-256".into(), bytes });
             api.start_dtls(!is_host).map_err(|_| PHOROS_ERR_PANIC)?;
             api.start_sctp(!is_host);
-            if is_host {
-                let reliable = api.create_data_channel(ChannelConfig { label: "reliable".into(), ordered: true, reliability: Reliability::Reliable, negotiated: Some(0), protocol: String::new() });
-                let realtime = api.create_data_channel(ChannelConfig { label: "realtime".into(), ordered: false, reliability: Reliability::MaxPacketLifetime { lifetime: 50 }, negotiated: Some(1), protocol: String::new() });
-                inner.channels = vec![reliable, realtime];
-            } else {
-                let reliable = api.create_data_channel(ChannelConfig { label: "reliable".into(), ordered: true, reliability: Reliability::Reliable, negotiated: Some(0), protocol: String::new() });
-                let realtime = api.create_data_channel(ChannelConfig { label: "realtime".into(), ordered: false, reliability: Reliability::MaxPacketLifetime { lifetime: 50 }, negotiated: Some(1), protocol: String::new() });
-                inner.channels = vec![reliable, realtime];
-            }
+            // Three pre-negotiated channels, the same ids on both sides. Realtime carries video
+            // deltas and input, where a message older than 50 ms is worthless. Audio gets its
+            // own lane with a longer lifetime: the receiver buffers a few hundred ms of it, so
+            // a chunk held up by a radio stall is still worth delivering (dropping it is a hole
+            // in the sound), and audio must never queue behind a keyframe on the reliable lane.
+            let reliable = api.create_data_channel(ChannelConfig { label: "reliable".into(), ordered: true, reliability: Reliability::Reliable, negotiated: Some(0), protocol: String::new() });
+            let realtime = api.create_data_channel(ChannelConfig { label: "realtime".into(), ordered: false, reliability: Reliability::MaxPacketLifetime { lifetime: 50 }, negotiated: Some(1), protocol: String::new() });
+            let audio = api.create_data_channel(ChannelConfig { label: "audio".into(), ordered: false, reliability: Reliability::MaxPacketLifetime { lifetime: 400 }, negotiated: Some(2), protocol: String::new() });
+            inner.channels = vec![reliable, realtime, audio];
         }
         // One video media line, one stream each way, fixed SSRCs both sides know.
         let mid: Mid = "0".into();
@@ -400,8 +400,8 @@ pub unsafe extern "C" fn phoros_peer_poll(peer: *mut PhorosPeer, now_us: i64, ou
     }) { Ok(()) => PHOROS_OK, Err(e) => e }
 }
 
-/// Sends `bytes` on channel 0 (reliable) or 1 (realtime). Returns an error before the
-/// channel is open.
+/// Sends `bytes` on channel 0 (reliable), 1 (realtime) or 2 (audio). Returns an error before
+/// the channel is open.
 #[no_mangle]
 pub unsafe extern "C" fn phoros_peer_send(peer: *mut PhorosPeer, channel: u32, bytes: *const u8, len: usize) -> i32 {
     if peer.is_null() || bytes.is_null() { return PHOROS_ERR_NULL; }

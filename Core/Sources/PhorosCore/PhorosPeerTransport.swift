@@ -44,6 +44,19 @@ public final class PhorosPeerTransport: PhorosRealtimeTransport {
     /// Frames allowed in flight before the host holds the next one (ack clocking).
     public var ackWindow: UInt32 = 1
     public var sendFrameAcks = true
+
+    /// The sender's media clock, microseconds, as last seen: from the transport offer, then
+    /// from every audio chunk. Video arrives with its timestamp reduced to 32 bits of 90 kHz
+    /// RTP ticks (a 13 h cycle); `unwrap` puts it back on the sender's full timeline, next to
+    /// this reference, so the receiver can place audio against video. Without a reference
+    /// frames keep the reduced timestamp, as before 1.4.2.
+    public var hostTimeReference: Int64?
+    private static let rtpCycleMicros = Double(1 << 32) * 100 / 9
+    private func unwrap(_ reducedMicros: Int64) -> Int64 {
+        guard let reference = hostTimeReference else { return reducedMicros }
+        let cycles = ((Double(reference - reducedMicros)) / Self.rtpCycleMicros).rounded()
+        return reducedMicros + Int64(cycles * Self.rtpCycleMicros)
+    }
     private var lastAckedFrame: UInt32 = 0
     private var lastAckAt = Date()
     private var lastSendAt = Date.distantPast
@@ -67,7 +80,7 @@ public final class PhorosPeerTransport: PhorosRealtimeTransport {
             self.receivedFrames &+= 1
             if self.sendFrameAcks { self.send(.frameAck, Data([UInt8(number >> 24), UInt8((number >> 16) & 0xff), UInt8((number >> 8) & 0xff), UInt8(number & 0xff)]), realtime: true) }
             if !frame.contiguous { self.onKeyframeNeeded?() }
-            self.onInbound?(.video(AssembledFrame(frameNumber: number, presentationTimestamp: frame.presentationTimestamp, isKeyframe: frame.isKeyframe, bitstream: frame.annexB)))
+            self.onInbound?(.video(AssembledFrame(frameNumber: number, presentationTimestamp: self.unwrap(frame.presentationTimestamp), isKeyframe: frame.isKeyframe, bitstream: frame.annexB)))
         }
         peer.onEvent = { [weak self] event in
             guard let self else { return }
@@ -120,12 +133,75 @@ public final class PhorosPeerTransport: PhorosRealtimeTransport {
     private var retryScheduled = false
     public var maximumQueueAge: TimeInterval = 0.1
 
+    // MARK: Audio reordering (queue only)
+
+    /// The audio lane is unordered, so a chunk can overtake the one before it. Receivers
+    /// expect audio in sequence (Beam's guard drops a step backwards as a duplicate), so a
+    /// chunk that arrives ahead of a gap waits here up to `audioReorderHold` for the missing
+    /// one, then everything held goes out in order and the gap is given up on.
+    public var audioReorderHold: TimeInterval = 0.03
+    private var nextAudioSequence: UInt32?
+    private var heldAudio: [UInt32: (AudioChunkHeader, Data, AudioCodecID)] = [:]
+    private var audioReorderTimer: DispatchWorkItem?
+
+    private func reorderAudio(_ header: AudioChunkHeader, _ body: Data, codec: AudioCodecID) {
+        guard let next = nextAudioSequence else {
+            nextAudioSequence = header.sequenceNumber &+ 1
+            onInbound?(.audio(header, body, codec: codec))
+            return
+        }
+        let ahead = header.sequenceNumber &- next
+        if ahead == 0 {
+            deliverAudio(header, body, codec: codec)
+            releaseHeldAudioInOrder()
+        } else if ahead < 64 {
+            heldAudio[header.sequenceNumber] = (header, body, codec)
+            if audioReorderTimer == nil {
+                let item = DispatchWorkItem { [weak self] in
+                    guard let self else { return }
+                    self.audioReorderTimer = nil
+                    // the gap did not fill in time: skip to the oldest held chunk
+                    if let oldest = self.heldAudio.keys.min(by: { ($0 &- next) < ($1 &- next) }) { self.nextAudioSequence = oldest }
+                    self.releaseHeldAudioInOrder()
+                }
+                audioReorderTimer = item
+                queue.asyncAfter(deadline: .now() + audioReorderHold, execute: item)
+            }
+        } else {
+            // far behind (a late straggler) or a restart: pass it through, the guard decides
+            onInbound?(.audio(header, body, codec: codec))
+            if ahead > UInt32.max / 2 { return }
+            nextAudioSequence = header.sequenceNumber &+ 1
+        }
+    }
+
+    private func deliverAudio(_ header: AudioChunkHeader, _ body: Data, codec: AudioCodecID) {
+        nextAudioSequence = header.sequenceNumber &+ 1
+        onInbound?(.audio(header, body, codec: codec))
+    }
+
+    private func releaseHeldAudioInOrder() {
+        while let next = nextAudioSequence, let (header, body, codec) = heldAudio.removeValue(forKey: next) {
+            deliverAudio(header, body, codec: codec)
+        }
+        if heldAudio.isEmpty { audioReorderTimer?.cancel(); audioReorderTimer = nil }
+    }
+
+    /// Core channel ids: 0 reliable and ordered, 1 realtime (50 ms lifetime), 2 audio (400 ms).
+    private enum Lane: Int { case reliable = 0, realtime = 1, audio = 2 }
+    /// Audio waits in the outbox up to this long: the receiver holds a few hundred ms of it.
+    public var maximumAudioQueueAge: TimeInterval = 0.4
+
     private func send(_ tag: Tag, _ payload: Data, realtime: Bool) {
+        send(tag, payload, lane: realtime ? .realtime : .reliable)
+    }
+
+    private func send(_ tag: Tag, _ payload: Data, lane: Lane) {
         guard !cancelled else { return }
         var message = Data([tag.rawValue])
         message.append(payload)
         queue.async { [self] in
-            outbox.append((realtime ? 1 : 0, message, Date()))
+            outbox.append((lane.rawValue, message, Date()))
             flush()
         }
     }
@@ -133,9 +209,13 @@ public final class PhorosPeerTransport: PhorosRealtimeTransport {
     /// Queue only. Writes what the association takes, keeps the rest for a retry.
     private func flush() {
         while let next = outbox.first {
-            if next.channel == 1, Date().timeIntervalSince(next.at) > maximumQueueAge {
+            if next.channel == Lane.realtime.rawValue, Date().timeIntervalSince(next.at) > maximumQueueAge {
                 outbox.removeFirst()
                 metrics.droppedVideoFrames += 1
+                continue
+            }
+            if next.channel == Lane.audio.rawValue, Date().timeIntervalSince(next.at) > maximumAudioQueueAge {
+                outbox.removeFirst()
                 continue
             }
             let status = peer.send(channel: next.channel, next.message)
@@ -214,7 +294,7 @@ public final class PhorosPeerTransport: PhorosRealtimeTransport {
         var payload = Data([codec.packetFlags])
         payload.append(AudioChunkHeader(sequenceNumber: sequence, presentationTimestamp: presentationTimestamp).serialized())
         payload.append(accessUnit)
-        send(.audio, payload, realtime: true)
+        send(.audio, payload, lane: .audio)
     }
 
     public func sendInput(_ report: ControllerReport, connected: Bool) {
@@ -243,7 +323,8 @@ public final class PhorosPeerTransport: PhorosRealtimeTransport {
         case .audio:
             guard let flag = body.first, let codec = AudioCodecID(packetFlags: flag),
                   let header = AudioChunkHeader.parse(from: Data(body.dropFirst())) else { return }
-            onInbound?(.audio(header, Data(body.dropFirst(1 + AudioChunkHeader.size)), codec: codec))
+            hostTimeReference = header.presentationTimestamp   // audio carries the full timestamp
+            queue.async { self.reorderAudio(header, Data(body.dropFirst(1 + AudioChunkHeader.size)), codec: codec) }
         case .input:
             guard let flag = body.first, let report = ControllerReport.parse(from: Data(body.dropFirst())) else { return }
             onInbound?(.input(report, connected: flag & ControllerReport.connectedFlag != 0))
