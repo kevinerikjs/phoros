@@ -1,21 +1,21 @@
 # Phoros Core
 
-The Rust half of Phoros 2 (BEAM-49): a sans-IO realtime state machine behind a C ABI, built as an XCFramework and wrapped by a thin Swift target. This directory is its own Swift package, separate from the main one on purpose: a binary target whose file is missing breaks every consumer's resolution, and the XCFramework is built locally until it ships as a release artifact.
+The Rust half of Phoros 2 (BEAM-49): a sans-IO realtime state machine behind a C ABI, built as an XCFramework and wrapped by the `PhorosCore` target of the main package. Each release publishes `PhorosCore.xcframework.zip` as a GitHub release asset and `Package.swift` pins its checksum, so consumers never build Rust. Work on the core itself builds it here and links the local copy with `PHOROS_CORE_LOCAL=1`.
 
 ```
 Core/
 ├── phoros-core/       # the Rust crate (cargo test works on its own)
 ├── include/           # phoros_core.h and the module map, the whole ABI
 ├── build.sh           # cargo for four Apple targets, lipo, xcodebuild -create-xcframework
-├── Sources/PhorosCore # RealtimeCore and RealtimePeer, the Swift wrappers
-└── Tests              # the boundary tests
+└── build/             # the XCFramework, its zip and checksum (not committed)
 ```
 
 ```
-./build.sh          # needs rustup targets aarch64-apple-darwin, x86_64-apple-darwin, aarch64-apple-ios, aarch64-apple-ios-sim
-swift test          # macOS
-xcodebuild test -scheme PhorosCore -destination 'platform=iOS Simulator,name=iPhone 17'
+Core/build.sh                          # needs rustup targets aarch64-apple-darwin, x86_64-apple-darwin, aarch64-apple-ios, aarch64-apple-ios-sim
+PHOROS_CORE_LOCAL=1 swift test         # against the local build; without the variable, the released zip
 ```
+
+Release: run `Core/build.sh`, put the printed checksum and the version in `Package.swift`, tag, then attach `Core/build/PhorosCore.xcframework.zip` to the GitHub release of that tag.
 
 ## The contract at the boundary
 

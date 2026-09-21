@@ -19,3 +19,6 @@ xcodebuild -create-xcframework \
   -library "$OUT/sim/libphoros_core.a" -headers "$HERE/include" \
   -output "$OUT/PhorosCore.xcframework" | tail -1
 du -sh "$OUT/PhorosCore.xcframework"
+# The release artifact: a zip of the framework and its SwiftPM checksum, for Package.swift.
+(cd "$OUT" && rm -f PhorosCore.xcframework.zip && ditto -c -k --keepParent PhorosCore.xcframework PhorosCore.xcframework.zip)
+(cd "$HERE/.." && swift package compute-checksum "$OUT/PhorosCore.xcframework.zip")

@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.4.2
+
+Protocol version stays 1. Additive.
+
+- `PhorosCore`, a new product: the Phoros 2 realtime peer. A Rust core (str0m, vendored with a 5 ms NACK interval and no pacer) behind a C ABI, shipped as `PhorosCore.xcframework.zip` on the release and pinned by checksum in `Package.swift`. `RealtimePeer` owns a UDP socket, ICE, DTLS, SCTP and one video stream each way. `PhorosPeerTransport` is a `PhorosRealtimeTransport` over it: video over RTP with RTX and a datagram-level XOR FEC, parameter sets and control on the reliable lane, input on the realtime lane (50 ms lifetime), audio on its own lane (400 ms lifetime, reordered on receipt), frame acks, a stall signal for a host watchdog, a keyframe request when a gap is not repaired in time, and `cancel()` as a full teardown.
+- `Phoros`: `ControlMessage.transportOffer` and `.transportAnswer` carry `TransportOffer` (`kind`, `address`, `info`, and `hostMicros`, the host clock so the receiver can put RTP's 32-bit timestamps back on the full timeline). `ControlMessage.transportFallback`: the host moved media and input back to the base transport. `ControllerReport.sequence`, an optional trailing sequence number for a report delivered on more than one transport.
+- 136 tests.
+
 ## 1.4.1
 
 Protocol version stays 1. Additive.
