@@ -7,6 +7,9 @@ CRATE="$HERE/phoros-core"
 OUT="$HERE/build"
 rm -rf "$OUT"; mkdir -p "$OUT/macos" "$OUT/ios" "$OUT/sim"
 cd "$CRATE"
+# Deployment targets match the Swift package (macOS 12, iOS 15): the Swift objects some
+# crates carry are otherwise stamped with the SDK version and warn at every link.
+export MACOSX_DEPLOYMENT_TARGET=12.0 IPHONEOS_DEPLOYMENT_TARGET=15.0
 for t in aarch64-apple-darwin x86_64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim; do
   cargo build --release --target "$t" 2>&1 | grep -E 'error|Finished' | tail -1
 done

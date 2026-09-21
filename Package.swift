@@ -7,7 +7,7 @@ import PackageDescription
 // PHOROS_CORE_LOCAL=1 (or an xcodeproj built with that in its environment) links the one
 // Core/build.sh just produced instead, for work on the core itself.
 let coreVersion = "1.4.2"
-let coreChecksum = "b076df47b100555b753cb26e2623fcf185c302bede2995b6084aa17cf9b4b2a7"
+let coreChecksum = "c2bf2134b581528895f9580b1919dc762499d8f8a6db155e55b24f7a03c41cdc"
 let coreFFI: Target = ProcessInfo.processInfo.environment["PHOROS_CORE_LOCAL"] != nil
     ? .binaryTarget(name: "PhorosCoreFFI", path: "Core/build/PhorosCore.xcframework")
     : .binaryTarget(name: "PhorosCoreFFI",
