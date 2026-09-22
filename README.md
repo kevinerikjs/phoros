@@ -104,58 +104,97 @@ targets: [
         .product(name: "PhorosNetwork", package: "phoros"),
         .product(name: "PhorosMedia", package: "phoros"),
         .product(name: "PhorosInput", package: "phoros"),
-        .product(name: "PhorosCore", package: "phoros"),   // optional, the v2 transport
+        .product(name: "PhorosCore", package: "phoros"),   // the v2 UDP transport
     ])
 ]
 ```
 
 Pin an exact version. Two apps on different release schedules sharing a wire protocol should not float.
 
-## A host
+## How the transports fit together
 
-`PhorosLegacyTransport` owns framing, fragmentation, scheduling, shedding, probing and bitrate. The caller owns capture, codecs and policy.
+Every connection starts on v1 TCP. It carries pairing, authentication and control messages. After authentication the host offers v2 UDP; if the client accepts, media (video, audio) and input move to the UDP peer. Control stays on TCP. If the UDP peer fails mid-session, media falls back to TCP automatically.
+
+Both transports implement `PhorosRealtimeTransport`, so the send path picks whichever is connected:
 
 ```swift
-import Phoros, PhorosSession, PhorosNetwork, PhorosMedia
+var media: PhorosRealtimeTransport {
+    if rtcReady, let rtcTransport { return rtcTransport }
+    return tcp
+}
+```
 
-let transport = PhorosLegacyTransport(accepting: connection, options: .init(role: .host))
+A client that does not implement v2 ignores the offer and stays on TCP. This is rule 4 of [docs/compatibility.md](docs/compatibility.md): unknown messages are dropped and the session continues.
+
+## A host
+
+The TCP transport handles framing, fragmentation, scheduling, shedding, probing and bitrate. The caller owns capture, codecs and policy.
+
+```swift
+import Phoros, PhorosSession, PhorosNetwork, PhorosMedia, PhorosCore
+
+let tcp = PhorosLegacyTransport(accepting: connection, options: .init(role: .host))
 let encoder = VideoEncoder(configuration: .init(width: 1920, height: 1080, frameRate: 60, codec: .hevc))
 
-transport.onKeyframeNeeded = { encoder.requestKeyframe() }
-transport.onBitrateChange = { encoder.setBitrate($0) }
+tcp.onKeyframeNeeded = { encoder.requestKeyframe() }
+tcp.onBitrateChange = { encoder.setBitrate($0) }
 
-transport.onInbound = { inbound in
-    guard case .message(let json) = inbound,
-          let request = try? JSONDecoder().decode(PairingMessage.self, from: json) else { return }
-    switch HostAuthenticator.authenticate(request, storedSecret: keychain.secret(for:), capabilities: myCapabilities) {
-    case .authenticated(let session):
-        transport.sendMessage(try! JSONEncoder().encode(session.reply))
-        transport.setStreaming(true)
-        try? encoder.start()
-    case .rejected(let reply):
-        transport.sendMessage(try! JSONEncoder().encode(reply))
+tcp.onInbound = { inbound in
+    switch inbound {
+    case .message(let json):
+        guard let request = try? JSONDecoder().decode(PairingMessage.self, from: json) else { return }
+        switch HostAuthenticator.authenticate(request, storedSecret: keychain.secret(for:), capabilities: myCapabilities) {
+        case .authenticated(let session):
+            tcp.sendMessage(try! JSONEncoder().encode(session.reply))
+            tcp.setStreaming(true)
+            try? encoder.start()
+            offerRTC()
+        case .rejected(let reply):
+            tcp.sendMessage(try! JSONEncoder().encode(reply))
+        }
+    case .control(.transportAnswer(let answer)):
+        guard answer.kind == "rtc2", let peer = rtcPeer else { return }
+        peer.setRemote(info: answer.info, address: answer.address, nowMicros: 0)
+    default: break
     }
 }
 
-encoder.onParameterSets = { sets, codec in transport.sendVideoParameterSets(sets, codec: codec) }
+encoder.onParameterSets = { sets, codec in media.sendVideoParameterSets(sets, codec: codec) }
 encoder.onFrame = { annexB, pts, isKeyframe in
-    transport.sendVideo(annexB, presentationTimestamp: pts.phorosMicroseconds, isKeyframe: isKeyframe)
+    media.sendVideo(annexB, presentationTimestamp: pts.phorosMicroseconds, isKeyframe: isKeyframe)
 }
-transport.start()
+tcp.start()
 
-// Check the transport before encoding. No point encoding a frame the link can't take.
 screenCapture.onFrame = { sample in
-    guard transport.acceptsVideoFrame else { return }
+    guard media.acceptsVideoFrame else { return }
     encoder.encode(sampleBuffer: sample)
+}
+```
+
+After authentication, the host offers v2:
+
+```swift
+func offerRTC() {
+    guard let peer = RealtimePeer(isHost: true, localAddress: "\(localIP):7981") else { return }
+    let transport = PhorosPeerTransport(peer: peer, queue: stateQueue)
+    transport.onReady = { [self] in rtcReady = true; requestKeyframe() }
+    transport.onEnd = { [self] _ in fallBack() }
+    transport.onKeyframeNeeded = { encoder.requestKeyframe() }
+    rtcPeer = peer; rtcTransport = transport
+    guard peer.runOwnSocket() == 0 else { return }
+    tcp.sendControl(.transportOffer(TransportOffer(
+        kind: "rtc2", address: "\(localIP):7981", info: peer.localInfo,
+        hostMicros: CMClockGetTime(CMClockGetHostTimeClock()).phorosMicroseconds
+    )))
 }
 ```
 
 ## A client
 
 ```swift
-let transport = PhorosLegacyTransport(to: endpoint)
-transport.onReady = { transport.sendMessage(try! JSONEncoder().encode(me.authRequest(secret: stored))) }
-transport.onInbound = { inbound in
+let tcp = PhorosLegacyTransport(to: endpoint)
+tcp.onReady = { tcp.sendMessage(try! JSONEncoder().encode(me.authRequest(secret: stored))) }
+tcp.onInbound = { inbound in
     switch inbound {
     case .videoParameterSets(let sets, let codec):
         description = VideoFormat.makeDescription(parameterSets: sets, codec: codec)
@@ -166,15 +205,29 @@ transport.onInbound = { inbound in
         displayLayer.enqueue(sample)
     case .audio(let header, let body, let codec):
         play(body, codec: codec, at: header.presentationTimestamp)
+    case .control(.transportOffer(let offer)):
+        acceptRTC(offer)
     case .message(let json):
         handleAuthReply(json)
     default: break
     }
 }
-transport.start()
+tcp.start()
+
+func acceptRTC(_ offer: TransportOffer) {
+    guard offer.kind == "rtc2" else { return }
+    guard let peer = RealtimePeer(isHost: false, localAddress: "\(myIP):7982") else { return }
+    let transport = PhorosPeerTransport(peer: peer)
+    transport.hostTimeReference = offer.hostMicros
+    transport.onInbound = { inbound in handleInbound(inbound) }
+    transport.onEnd = { _ in tcp.sendControl(.transportFallback) }
+    guard peer.runOwnSocket() == 0 else { return }
+    peer.setRemote(info: offer.info, address: offer.address, nowMicros: 0)
+    tcp.sendControl(.transportAnswer(TransportOffer(kind: "rtc2", address: "\(myIP):7982", info: peer.localInfo)))
+}
 ```
 
-[docs/session.md](docs/session.md) covers pairing, the full handshake and both sides in order. [docs/realtime.md](docs/realtime.md) adds the v2 transport on top of this.
+[docs/session.md](docs/session.md) covers pairing and the full handshake. [docs/realtime.md](docs/realtime.md) covers the v2 transport in detail: lanes, loss repair, timestamps, fallback.
 
 ## Measured
 
@@ -255,8 +308,6 @@ swift test
 | `PhorosNetworkTests` | 4 | Frame decoding, length bounds, transport options. |
 
 The Rust core has its own suite (`cd Core/phoros-core && cargo test`), including an ICE-to-media loopback between two peers in one process.
-
-Before releasing an app built on this package, test three device combinations: new client with new host, new client with previous host, previous client with new host.
 
 ## Contributing
 
