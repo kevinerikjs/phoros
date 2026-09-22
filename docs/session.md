@@ -101,7 +101,7 @@ Pass `audioPreferences: [.pcmFloat32]` to force PCM for a session, for example f
 
 ## The transport seam
 
-Since 1.4.0 an application does not have to assemble the pieces below by hand. `PhorosRealtimeTransport` (in `PhorosSession`) is the seam between an application and the wire: it sends and receives the units the application thinks in (a whole video frame, an audio chunk, a controller report, a control message) and owns framing, fragmentation, reassembly, scheduling, shedding, the link probe, bitrate control, heartbeats and the radio keep-awake. `PhorosLegacyTransport` (in `PhorosNetwork`) is the v1 TCP wire behind it, byte for byte what Beam 3 and Beacon 1.4 speak. A later transport implements the same protocol and the application does not change.
+Since 1.4.0 an application does not have to assemble the pieces below by hand. `PhorosRealtimeTransport` (in `PhorosSession`) is the seam between an application and the wire: it sends and receives the units the application thinks in (a whole video frame, an audio chunk, a controller report, a control message) and owns framing, fragmentation, reassembly, scheduling, shedding, the link probe, bitrate control, heartbeats and the radio keep-awake. `PhorosLegacyTransport` (in `PhorosNetwork`) is the v1 TCP wire behind it, byte for byte what Beam 3 and Beacon 1.4 speak. `PhorosPeerTransport` (in `PhorosCore`, since 1.4.2) is the UDP one, and an application that talks to the seam switches between them by constructing a different object. See [realtime.md](realtime.md).
 
 ```swift
 // host
@@ -179,7 +179,7 @@ while let write = scheduler.dequeue() {
 }
 ```
 
-`admitCapture` and `admitVideo` refuse when the video between the encoder and the peer is above the budget: bytes queued here, bytes handed to the transport, and bytes the transport reports it still holds (`transportBacklog`, the kernel's unacknowledged bytes on TCP; a write completes when the kernel takes it, not when the peer has it). The budget is `policy.maximumQueuedBytes`, or less once the drain rate says that many bytes would take longer than `policy.maximumQueueDelay` to send. Refuse at capture when you can: a skipped capture costs nothing, while a frame dropped after encoding breaks the reference chain, so `admitVideo` then refuses every delta until a keyframe is enqueued and sets `needsKeyframe` for you to ask the encoder. A keyframe is never refused. Queued delta frames older than `policy.maximumVideoQueueAge` are shed at `dequeue`. `admitAudio` refuses only on the audio backlog and never for longer than `policy.maximumAudioSilence`. `dequeue` returns control first, then audio, then video, and holds at `policy.maximumConcurrentWrites` outstanding writes.
+`admitCapture` and `admitVideo` refuse when the video between the encoder and the peer is above the budget: bytes queued here, bytes handed to the transport, and bytes the transport reports it still holds (`transportBacklog`, the kernel's unacknowledged bytes on TCP, because a write completes when the kernel takes it and not when the peer has it). The budget is `policy.maximumQueuedBytes`, or less once the drain rate says that many bytes would take longer than `policy.maximumQueueDelay` to send. Refuse at capture when you can: a skipped capture costs nothing, while a frame dropped after encoding breaks the reference chain, so `admitVideo` then refuses every delta until a keyframe is enqueued and sets `needsKeyframe` for you to ask the encoder. A keyframe is never refused. Queued delta frames older than `policy.maximumVideoQueueAge` are shed at `dequeue`. `admitAudio` refuses only on the audio backlog and never for longer than `policy.maximumAudioSilence`. `dequeue` returns control first, then audio, then video, and holds at `policy.maximumConcurrentWrites` outstanding writes.
 
 ### Bitrate from the link
 
@@ -274,7 +274,7 @@ ClientCapabilities(deviceName: name, deviceID: id, maximumFrameRate: Double(scre
 let rate = sessions.map { $0.peer.videoFrameRate(preset: preset.frameRate, hostRefreshRate: display.refreshRate) }.min()
 ```
 
-Only the 60 fps presets are raised. A 165 Hz Mac and a 120 Hz phone give 120 fps; each frame the host adds is a fresher frame at the phone's next refresh. Measured on the reference host, button to decoded frame at 1080p60 went from 27.5/32.9 ms (p50/p95) at 60 fps to 19.1/25.0 at 120.
+Only the 60 fps presets are raised. A 165 Hz Mac and a 120 Hz phone give 120 fps, and each frame the host adds is a fresher frame at the phone's next refresh. Measured on the reference host, button to decoded frame at 1080p60 went from 27.5/32.9 ms (p50/p95) at 60 fps to 19.1/25.0 at 120.
 
 ## Clock sync
 
@@ -296,6 +296,10 @@ case .clockProbe(let probe):
 ```
 
 `ClockSync` keeps the offset from the sample with the shortest recent round trip, so queueing on the way makes an estimate worse only until a clean sample arrives. Times are microseconds of `CMClockGetHostTimeClock`, the clock the reference host stamps video with.
+
+## A second transport
+
+Since 1.4.2 a host can offer a UDP peer for media and input, keeping this connection for pairing, control and fallback. The application side is two control messages and a different object behind the seam. [realtime.md](realtime.md) has it.
 
 ## Quality adaptation
 

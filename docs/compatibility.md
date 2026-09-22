@@ -2,7 +2,7 @@
 
 Two apps built on this protocol are installed and updated separately. A phone app arrives from an app store on the user's schedule. A Mac app updates itself on its own schedule. At any moment, some pairs in the world run versions released a year apart, in both directions. Nothing in the protocol can assume the other side is current.
 
-This document lists the rules that follow from that, and the incident behind each rule. Code enforces the rules where it can. `PeerCapabilities` applies them to every handshake. The test suite pins every byte and every JSON key that a shipped peer depends on.
+This document lists the rules that follow from that, and the incident behind each rule. Every incident below happened to a shipped build. Code enforces the rules where it can: `PeerCapabilities` applies them to every handshake, and the test suite pins every byte and every JSON key that a shipped peer depends on.
 
 ## Rule 1: add, never change
 
@@ -66,11 +66,24 @@ Codec lists in the handshake are strings, not enums, for the same reason seen fr
 
 `PacketHeader` is ten bytes. `VideoFragmentHeader` is sixteen. `AudioChunkHeader` is twelve. `ControllerReport` is fourteen. Shipped receivers skip them by constant offset. New per-packet information goes in the flags byte or in a new packet type, never in a longer header.
 
+A field appended after a fixed header is a different thing and is allowed, because every offset before it is unchanged. `ControllerReport.sequence` (1.4.2) is two bytes after the fourteen. A sender adds them only when it has a reason to, a receiver reads them only when the payload is long enough, and an older receiver reaches the end of what it knows and stops. The test that pins the fourteen-byte form still passes unchanged, which is the check that this was an append and not a growth.
+
 ## Rule 6: private data stays inside the authenticated session
 
 Window titles are as private as the screen itself. The host sends the window list only over an authenticated session, never on the pairing channel. The pairing code itself never crosses the wire. It goes through the person, from one screen to the other.
 
-## Rule 7: a package version is not a protocol version
+## Rule 7: a second transport is a capability, not a fork
+
+A host may offer a different wire for media (`transport_offer`, since 1.4.2). Four things keep that from splitting the protocol in two:
+
+- The offer is a control message on the authenticated connection. A client that does not know the message ignores it and the session runs unchanged, which is rule 4.
+- The offered transport carries the same units, framed the same way, behind the same seam. Nothing on it is exclusive to it.
+- Pairing, authentication and control stay on the base connection for the whole session, so there is one source of truth for session state.
+- The host can withdraw the offer at any moment with `transport_fallback` and continue on the base connection. A transport is an optimisation. Losing it must never lose the session.
+
+**The incident.** The first version of the offer carried no clock reading. RTP reduces a presentation timestamp to 32 bits of 90 kHz ticks, so video arrived on a timeline that restarts every thirteen hours while audio kept the full microsecond value. A client that anchors audio to video measured an offset of about fifteen minutes and resynchronised twice a second, discarding its audio queue each time. `hostMicros` on the offer is the reading that puts them back together. The rule it teaches: when a transport changes the units a receiver compares, say so in the message that introduces it.
+
+## Rule 8: a package version is not a protocol version
 
 This package follows semantic versioning for its Swift API. A major release of the package means Swift code needs changes. It does not mean the wire changed. A wire change is a separate, deliberate event, recorded in `Phoros.protocolVersion`. It has not happened. If it does, the host must return an actionable error to an older client instead of letting it fail silently.
 

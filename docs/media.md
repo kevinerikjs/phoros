@@ -33,10 +33,10 @@ Locked in, because each one cost a release to learn:
 | Frame reordering | off | B-frames add a frame of delay and break the keyframe-or-not packet split. |
 | Profile | H.264 High, HEVC Main, automatic level | Widest hardware decode support at the quality this needs. |
 | Data rate limit | twice the target bitrate | Bounds keyframe bursts so one keyframe cannot flood a slow link. |
-| Keyframe interval | two seconds | A joining or recovering client waits at most this long for a picture. |
+| Keyframe interval | two seconds, configurable | A joining or recovering client waits at most this long for a picture. The reference host ships five seconds, because a transport that never loses a frame makes periodic keyframes almost pure cost. |
 | Hardware only | required | A software encoder cannot keep up with a live screen and would mask a missing encoder as a slow one. |
 
-`VideoEncoderConfiguration.latency` (1.4.0) holds the knobs the latency harness measured. `lowLatencyRateControl` asks for the hardware's low-latency rate-control mode (`kVTVideoEncoderSpecification_EnableLowLatencyRateControl`): on the reference host it cut encode time from 12.8 to 6.6 ms per 1080p frame and holds the target bitrate on busy content where the default mode overshoots it by half. The session falls back to a normal one when the encoder refuses it. `maxFrameDelayCount`, `prioritizeSpeed` and `h264Profile = .baseline` measured no gain and stay off by default. `keyframeInterval` is on the configuration; the reference host raises it to ten seconds when a link is slow, because a 1080p keyframe is a quarter second of a 6 Mbps link.
+`VideoEncoderConfiguration.latency` (1.4.0) holds the knobs the reference host's latency harness measured. `lowLatencyRateControl` asks for the hardware's low-latency rate-control mode (`kVTVideoEncoderSpecification_EnableLowLatencyRateControl`): on the reference host it cut encode time from 12.8 to 6.6 ms per 1080p frame and holds the target bitrate on busy content where the default mode overshoots it by half. The session falls back to a normal one when the encoder refuses it. `maxFrameDelayCount`, `prioritizeSpeed` and `h264Profile = .baseline` measured no gain and stay off by default. `keyframeInterval` is on the configuration. The reference host raises it to ten seconds when a link is slow, because a 1080p keyframe is a quarter second of a 6 Mbps link.
 
 If the hardware has no HEVC encoder the session starts as H.264 and says so through `onParameterSets`. `VideoEncoder.isHEVCSupported` probes once for the capability advertisement.
 
@@ -50,7 +50,7 @@ let payload = VideoFormat.parameterSets(from: encoderDescription, codec: codec) 
 let sample = VideoFormat.makeSampleBuffer(annexB: frame, formatDescription: description, presentationTime: hostNow)
 ```
 
-Stamp sample buffers with the receiver's own clock. The sender's timestamps are on the sender's clock. Scheduling against them displays nothing.
+Stamp sample buffers with the receiver's own clock. The sender's timestamps are on the sender's clock, and scheduling against them displays nothing. Keep the sender's value for A/V alignment and for `ClockSync`, not for presentation.
 
 ### `AnnexB`
 

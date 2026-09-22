@@ -6,6 +6,8 @@ Protocol version 1. All multi-byte integers are big-endian. All JSON is UTF-8.
 
 One reliable, ordered byte stream per session (TCP in the reference apps). The host listens on a fixed port. The client connects. Discovery of the host is outside the protocol (Bonjour in the reference apps).
 
+Since 1.4.2 a host may additionally offer a UDP transport that carries media and input once it connects. This document describes the byte stream, which every peer speaks. The UDP wire and the two messages that set it up are in [realtime.md](realtime.md).
+
 The stream carries **frames**. A frame is a 4-byte length followed by that many bytes:
 
 ```
@@ -125,6 +127,15 @@ offset  size  field
 
 Buttons, bit 0 upward: A, B, X, Y, left shoulder, right shoulder, left thumbstick, right thumbstick, D-pad up, down, left, right, menu, options, home.
 
+Two more bytes may follow (since 1.4.2):
+
+```
+offset  size  field
+    14     2  sequence, UInt16, wrapping, +1 per report
+```
+
+A client that sends the same report on two transports at once numbers them, so the host can play the first copy to arrive and drop the second. A payload of exactly fourteen bytes has no sequence and is what every client before 1.4.2 sends. `ControllerReport.parse` reads the field only when the payload is long enough, and `ControllerReport.isNewer(_:than:)` compares two wrapping values.
+
 Packet flags bit 0 set means a controller is attached. A report with the bit clear is neutral and tells the host to release its virtual device. The client sends reports at up to 60 Hz. A host that cannot replay input recognises the type and drops it.
 
 A host that can replay input says so with `supportsControllerInput` in `pair_success` and `auth_success`. A client should not sample a controller for a host that did not. `PhorosInput` has both ends: `ControllerSampler` for the client and `VirtualGamepad` for a macOS host. See [input.md](input.md).
@@ -208,7 +219,7 @@ JSON object with `type` and, for some types, `payload`. The client sends it bare
 | `video_resume` | client → host | none |
 | `audio_format_changed` | host → client | `{"sampleRate", "channels"}` |
 | `audio_enable_request` | client → host | `{"enabled": bool}`. Only if host `supportsAudioToggle` |
-| `bitrate_cap_request` | client → host | `{"bitsPerSecond": int}` or `{}` to lift. Video never exceeds it, whatever the preset. Since 1.4.1; older hosts ignore it |
+| `bitrate_cap_request` | client → host | `{"bitsPerSecond": int}` or `{}` to lift. Video never exceeds it, whatever the preset. Since 1.4.1. Older hosts ignore it |
 | `window_list_request` | client → host | none |
 | `window_list` | host → client | `{"windows": [{"id", "title", "app"}]}` |
 | `window_select_request` | client → host | `{"windowID": id}`, `0` for full display |
@@ -216,12 +227,27 @@ JSON object with `type` and, for some types, `payload`. The client sends it bare
 | `media_key` | client → host | see below |
 | `clock_probe` | client → host | `{"id", "sentAt"}`. Only if host `supportsClockSync`. Added in package 1.4.0 |
 | `clock_reply` | host → client | `{"id", "sentAt", "receivedAt", "repliedAt"}`. Added in package 1.4.0 |
+| `transport_offer` | host → client | `{"kind", "address", "info", "hostMicros"?}`. A second transport the client may accept. Added in package 1.4.2 |
+| `transport_answer` | client → host | the same shape, the client's side of it. Added in package 1.4.2 |
+| `transport_fallback` | host → client | none. Media and input are back on this connection. Added in package 1.4.2 |
 
 Preset names: `auto`, `360p30`, `480p30`, `720p30`, `720p60`, `1080p30`, `1080p60`.
 
 ### clock_probe and clock_reply
 
 One exchange samples the offset between the two clocks, as in NTP. `sentAt` is the client's clock when the probe left. The host echoes `id` and `sentAt`, adds `receivedAt` (its clock when the probe arrived) and `repliedAt` (its clock when the reply left). All four are microseconds of each peer's monotonic clock, the clock video presentation timestamps use, so the client can read a frame's timestamp as an age. `PhorosSession.ClockSync` does the arithmetic and keeps the sample with the shortest round trip.
+
+### transport_offer, transport_answer and transport_fallback
+
+```json
+{"type": "transport_offer", "payload": {"kind": "rtc2", "address": "192.168.1.2:7981", "info": "ufrag\npass\nfingerprint", "hostMicros": 1758484812345678}}
+```
+
+`kind` names the transport. `rtc2` is the UDP peer in `PhorosCore`. A client that does not know the kind ignores the message and the session continues on this connection, which is rule 4.
+
+`address` is where to send. `info` is the peer's ICE credentials and DTLS fingerprint, three lines. `hostMicros` is the host's media clock when the offer left, which lets the receiver put the offered transport's reduced timestamps back on the full timeline.
+
+`transport_answer` is the client's half, with its own address and info. `transport_fallback` has no payload and means the host has stopped using the offered transport for this session. See [realtime.md](realtime.md).
 
 ### media_key
 
