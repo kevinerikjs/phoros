@@ -48,6 +48,8 @@ public struct PeerCapabilities: Equatable, Sendable {
 
     /// The peer replays `.input` packets into a virtual game controller.
     public var supportsControllerInput: Bool
+    /// Press, drag, release, scroll and multi-clicks in click mode.
+    public var supportsPointer: Bool
 
     /// The peer answers `.clockProbe` with `.clockReply`.
     public var supportsClockSync: Bool
@@ -72,6 +74,7 @@ public struct PeerCapabilities: Equatable, Sendable {
         remoteHosts = message.remoteHosts ?? []
         controls = message.controls ?? []
         supportsControllerInput = message.supportsControllerInput ?? false
+        supportsPointer = message.supportsPointer ?? false
         supportsClockSync = message.supportsClockSync ?? false
         maximumFrameRate = message.maximumFrameRate.flatMap { $0 > 0 ? $0 : nil }
     }

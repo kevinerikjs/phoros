@@ -98,6 +98,7 @@ The wire side is `ControlMessage.mediaKey(MediaKeyCommand)`. One message carries
 - a `controlID` for a button the host advertised
 - `text` from a prompt
 - one `keystroke` from a live keyboard, with a `keystrokeModifiers` mask
+- one named `specialKey` from a desktop accessory row, with the same modifier mask
 - a `click` normalised to the frame [wire-format.md](wire-format.md) lists the fields.
 
 `KeyModifiers` is the mask. Its values are Carbon's: `command` 0x0100, `shift` 0x0200, `option` 0x0800, `control` 0x1000. The first host posted keystrokes with Carbon and the mask went out as it was. A client on any platform builds it from `ControlButton.modifier` names with `KeyModifiers(wireName:)`.
@@ -113,6 +114,8 @@ func handle(_ command: MediaKeyCommand) {
     guard InputReplay.isAccessibilityGranted else { return }
     if let text = command.text {
         InputReplay.typeText(text, thenReturn: true)
+    } else if let rawKey = command.specialKey, let key = SpecialKey(rawValue: rawKey) {
+        InputReplay.typeSpecialKey(key, modifiers: KeyModifiers(rawValue: command.keystrokeModifiers ?? 0))
     } else if let key = command.keystroke {
         InputReplay.typeKeystroke(key, modifiers: KeyModifiers(rawValue: command.keystrokeModifiers ?? 0))
     } else if let click = command.click, let point = screenPoint(for: click) {
@@ -126,8 +129,12 @@ func handle(_ command: MediaKeyCommand) {
 What the functions lock in:
 
 - `typeKeystroke` sends Backspace, Return and Tab as their real keys, so terminals and editors treat them as such. A character with modifiers is a chord and needs a real key code. The ANSI table supplies it, and a character with no key is typed plain. Everything else is typed as Unicode, which works on any keyboard layout.
+- `typeSpecialKey` presses and releases the named key on the same serial queue as live text. An unknown `specialKey` string is ignored, so adding a future key does not make an older host reject the whole control message.
 - `typeText` types one character per event with a 2 ms gap so terminals keep up, and can press Return at the end.
-- `click` moves the pointer first, then presses and releases with short gaps, so apps that track hover see the move.
+- `click` moves the pointer first, then presses and releases with short gaps, so apps that track hover see the move. `count` marks the click as the second or third of a series.
+- `pointerDown`, `pointerMove` and `pointerUp` hold a button across messages for a drag. `releasePointer` lets go of a held button. Call it when the client goes away, so no button stays down on the Mac.
+- `scroll` posts a continuous, pixel-based scroll at a point, like a trackpad.
+- `pressKey` with modifiers presses and releases the modifier keys around the key, like a physical keyboard. It does not only set flags on the key event: the event source keeps those flags, and a later unmodified character would inherit them.
 - `postMediaKey` posts the NX system-defined events media-key hardware produces, so the key reaches whichever app is playing.
 - `perform(_ key:)` is the original behaviour for the built-in buttons: media keys for transport, arrow keys for seek.
 

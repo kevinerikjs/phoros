@@ -121,6 +121,12 @@ public struct PairingMessage: Codable, Equatable, Sendable {
     /// `.windowSelectRequest`.
     public var supportsWindowSelection: Bool?
 
+    /// `true` from hosts that act on `MediaKeyCommand.pointer` (press, drag,
+    /// release and scroll in click mode) and on `Click.count`. Absent means
+    /// the client sends plain single clicks only: an older host would turn
+    /// every drag update into a separate click.
+    public var supportsPointer: Bool?
+
     /// Buttons the host would like the client to show, in order. Absent means
     /// the client shows its built-in media keys.
     public var controls: [ControlButton]?
@@ -183,7 +189,8 @@ public struct PairingMessage: Codable, Equatable, Sendable {
         supportedVideoCodecs: [String]? = nil,
         wantsAudio: Bool? = nil,
         supportsClockSync: Bool? = nil,
-        maximumFrameRate: Double? = nil
+        maximumFrameRate: Double? = nil,
+        supportsPointer: Bool? = nil
     ) {
         self.type = type
         self.deviceName = deviceName
@@ -206,6 +213,7 @@ public struct PairingMessage: Codable, Equatable, Sendable {
         self.wantsAudio = wantsAudio
         self.supportsClockSync = supportsClockSync
         self.maximumFrameRate = maximumFrameRate
+        self.supportsPointer = supportsPointer
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -218,6 +226,7 @@ public struct PairingMessage: Codable, Equatable, Sendable {
         case supportsControllerInput
         case preferredAudioSampleRate, supportedAudioCodecs, supportedVideoCodecs, wantsAudio
         case supportsClockSync, maximumFrameRate
+        case supportsPointer
     }
 }
 

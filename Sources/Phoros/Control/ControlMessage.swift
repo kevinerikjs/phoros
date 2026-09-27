@@ -198,6 +198,37 @@ public struct CaptureMode: Codable, Equatable, Sendable {
     }
 }
 
+/// A named key the host can post as a real keyboard event.
+public enum SpecialKey: String, CaseIterable, Equatable, Sendable {
+    case escape
+    case tab
+    case leftArrow
+    case upArrow
+    case downArrow
+    case rightArrow
+    case home
+    case end
+    case pageUp
+    case pageDown
+    case forwardDelete
+    case f1
+    case f2
+    case f3
+    case f4
+    case f5
+    case f6
+    case f7
+    case f8
+    case f9
+    case f10
+    case f11
+    case f12
+
+    public static let functionKeys: [SpecialKey] = [
+        .f1, .f2, .f3, .f4, .f5, .f6, .f7, .f8, .f9, .f10, .f11, .f12
+    ]
+}
+
 /// Payload of `.mediaKey`. Started as a media-key message and grew into the
 /// client's general input path, which is why it has both `key` and the
 /// optional fields.
@@ -232,8 +263,17 @@ public struct MediaKeyCommand: Codable, Equatable, Sendable {
     /// chord when it can map the character to a key code.
     public var keystrokeModifiers: UInt32?
 
+    /// A named desktop key from the Beam keyboard accessory. Kept as a string
+    /// on the wire so peers can ignore future values without failing to decode
+    /// the rest of the media-key message.
+    public var specialKey: String?
+
     /// A tap on the stream while a click mode is active.
     public var click: Click?
+
+    /// A press, drag, release or scroll while a click mode is active. Only
+    /// sent to hosts whose `PeerCapabilities.supportsPointer` is true.
+    public var pointer: PointerEvent?
 
     public init(
         key: Key,
@@ -241,14 +281,18 @@ public struct MediaKeyCommand: Codable, Equatable, Sendable {
         text: String? = nil,
         keystroke: String? = nil,
         keystrokeModifiers: UInt32? = nil,
-        click: Click? = nil
+        specialKey: SpecialKey? = nil,
+        click: Click? = nil,
+        pointer: PointerEvent? = nil
     ) {
         self.key = key
         self.controlID = controlID
         self.text = text
         self.keystroke = keystroke
         self.keystrokeModifiers = keystrokeModifiers
+        self.specialKey = specialKey?.rawValue
         self.click = click
+        self.pointer = pointer
     }
 }
 
@@ -262,11 +306,47 @@ public struct Click: Codable, Equatable, Sendable {
     /// `"left"` or `"right"`.
     public var button: String
 
-    public init(x: Double, y: Double, button: String = "left") {
+    /// 2 for the second click of a double-click, 3 for a triple-click. The
+    /// host marks the click with it so apps see a real double-click. Absent
+    /// means 1, and hosts without `supportsPointer` ignore it.
+    public var count: Int?
+
+    public init(x: Double, y: Double, button: String = "left", count: Int? = nil) {
         self.x = x
         self.y = y
         self.button = button
+        self.count = count
     }
+}
+
+/// One step of a pointer gesture in click mode. Coordinates are normalised
+/// like `Click`. A drag is `down`, any number of `move`, then `up`, all with
+/// the same button. `scroll` carries a delta in points at `x`, `y`: positive
+/// `dy` moves the content down, as dragging it down with a finger does.
+public struct PointerEvent: Codable, Equatable, Sendable {
+    public enum Phase: String, Codable, Sendable {
+        case down, move, up, scroll
+    }
+
+    /// Kept as a string on the wire so a peer can ignore phases it does not know.
+    public var phase: String
+    public var x: Double
+    public var y: Double
+    /// `"left"` or `"right"`.
+    public var button: String?
+    public var dx: Double?
+    public var dy: Double?
+
+    public init(phase: Phase, x: Double, y: Double, button: String? = nil, dx: Double? = nil, dy: Double? = nil) {
+        self.phase = phase.rawValue
+        self.x = x
+        self.y = y
+        self.button = button
+        self.dx = dx
+        self.dy = dy
+    }
+
+    public var knownPhase: Phase? { Phase(rawValue: phase) }
 }
 
 /// One side of a second media transport. `kind` names the transport

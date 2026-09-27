@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.5.0
+
+Protocol version stays 1. Additive.
+
+- `Phoros`: optional `MediaKeyCommand.specialKey` string for named desktop keys. `SpecialKey` names Escape, Tab, the arrows, Home, End, Page Up, Page Down, Forward Delete and F1 to F12. Hosts ignore a value they do not know.
+- `Phoros`: `supportsPointer` capability, optional `Click.count` for double- and triple-clicks, and optional `MediaKeyCommand.pointer` (`PointerEvent`: press, drag, release and scroll).
+- `PhorosInput`: `InputReplay.typeSpecialKey`, `click(at:right:count:)`, `pointerDown`, `pointerMove`, `pointerUp`, `releasePointer` and `scroll`.
+- `PhorosInput`: fix. A chord from `pressKey` left its modifiers set on the event source, so the next plain character typed with them (⌘ stayed held after ⌘C). Chords now press and release real modifier keys, and Unicode characters carry empty flags.
+
 ## 1.4.2
 
 Protocol version stays 1. Additive.

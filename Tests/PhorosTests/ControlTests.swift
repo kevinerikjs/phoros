@@ -126,4 +126,46 @@ final class ControlTests: XCTestCase {
         let object = try object(.mediaKey(MediaKeyCommand(key: .next)))
         XCTAssertEqual((object["payload"] as? [String: Any])?.keys.sorted(), ["key"])
     }
+
+    func testPointerAndClickCountArePinned() throws {
+        let drag = ControlMessage.mediaKey(MediaKeyCommand(
+            key: .playPause, controlID: "click",
+            pointer: PointerEvent(phase: .move, x: 0.25, y: 0.5, button: "left")
+        ))
+        XCTAssertEqual(
+            try decode(#"{"type":"media_key","payload":{"key":"play_pause","controlID":"click","pointer":{"phase":"move","x":0.25,"y":0.5,"button":"left"}}}"#),
+            drag
+        )
+        let scroll = try decode(#"{"type":"media_key","payload":{"key":"play_pause","pointer":{"phase":"scroll","x":0.5,"y":0.5,"dx":0,"dy":-12}}}"#)
+        guard case .mediaKey(let payload) = scroll else { return XCTFail("not a media key") }
+        XCTAssertEqual(payload.pointer?.knownPhase, .scroll)
+        XCTAssertEqual(payload.pointer?.dy, -12)
+
+        let double = try decode(#"{"type":"media_key","payload":{"key":"play_pause","click":{"x":0.1,"y":0.2,"button":"left","count":2}}}"#)
+        guard case .mediaKey(let clicked) = double else { return XCTFail("not a media key") }
+        XCTAssertEqual(clicked.click?.count, 2)
+        // A click from an older client carries no count, and means a single click.
+        let single = try decode(#"{"type":"media_key","payload":{"key":"play_pause","click":{"x":0.1,"y":0.2,"button":"left"}}}"#)
+        guard case .mediaKey(let old) = single else { return XCTFail("not a media key") }
+        XCTAssertNil(old.click?.count)
+        // A phase this build does not know decodes, and is recognisably unknown.
+        let future = try decode(#"{"type":"media_key","payload":{"key":"play_pause","pointer":{"phase":"hover","x":0,"y":0}}}"#)
+        guard case .mediaKey(let later) = future else { return XCTFail("not a media key") }
+        XCTAssertNil(later.pointer?.knownPhase)
+    }
+
+    func testSpecialKeyIsPinned() throws {
+        let message = ControlMessage.mediaKey(MediaKeyCommand(
+            key: .playPause, controlID: "kb", keystrokeModifiers: 0x0800, specialKey: .leftArrow
+        ))
+        XCTAssertEqual(
+            try decode(#"{"type":"media_key","payload":{"key":"play_pause","controlID":"kb","keystrokeModifiers":2048,"specialKey":"leftArrow"}}"#),
+            message
+        )
+        // A key this build does not know still decodes; the host just ignores it.
+        let future = try decode(#"{"type":"media_key","payload":{"key":"play_pause","specialKey":"printScreen"}}"#)
+        guard case .mediaKey(let payload) = future else { return XCTFail("not a media key") }
+        XCTAssertEqual(payload.specialKey, "printScreen")
+        XCTAssertNil(SpecialKey(rawValue: payload.specialKey ?? ""))
+    }
 }

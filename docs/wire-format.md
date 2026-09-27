@@ -186,6 +186,7 @@ JSON object. `type` is required. Every other key is optional and omitted when no
 | `wantsAudio` | bool | auth_request | absent means `true` |
 | `maximumFrameRate` | number | auth_request | the highest video frame rate the client wants, normally its display's refresh rate. A host raises a 60 fps preset toward the lower of this and its own display. Absent means the preset's rate. Added in package 1.4.0 |
 | `supportsClockSync` | bool | auth_success | host answers `clock_probe` with `clock_reply`. Added in package 1.4.0 |
+| `supportsPointer` | bool | pair_success, auth_success | host acts on `media_key.pointer` and `click.count`. Absent means the client sends single clicks only. Added in package 1.5.0 |
 
 Codec lists are strings, not enums. An unknown future codec then cannot fail decoding of the message that carries the credentials. Receivers ignore unknown names.
 
@@ -252,7 +253,7 @@ One exchange samples the offset between the two clocks, as in NTP. `sentAt` is t
 ### media_key
 
 ```json
-{"key": "play_pause", "controlID": "…", "text": "…", "keystroke": "a", "keystrokeModifiers": 256, "click": {"x": 0.5, "y": 0.5, "button": "left"}}
+{"key": "play_pause", "controlID": "…", "text": "…", "keystroke": "a", "keystrokeModifiers": 256, "specialKey": "leftArrow", "click": {"x": 0.5, "y": 0.5, "button": "left", "count": 2}, "pointer": {"phase": "move", "x": 0.5, "y": 0.5, "button": "left"}}
 ```
 
 `key` is required. Values: `play_pause`, `next`, `previous`, `seek_backward`, `seek_forward`. The other fields are optional and extend the message into a general input path:
@@ -260,6 +261,8 @@ One exchange samples the offset between the two clocks, as in NTP. `sentAt` is t
 - `controlID` names an advertised button and takes precedence over `key`.
 - `text` is typed by the host, followed by Return.
 - `keystroke` is typed as-is. `"\n"` is Return and `"\u0008"` is Backspace. `keystrokeModifiers` is a chord in the host's native mask.
-- `click` is a tap at a normalised point on the frame the client shows.
+- `specialKey` is a named desktop key: `escape`, `tab`, `leftArrow`, `upArrow`, `downArrow`, `rightArrow`, `home`, `end`, `pageUp`, `pageDown`, `forwardDelete`, or `f1` through `f12`. It is an optional string so older peers ignore it and newer peers can ignore values they do not recognize. When present, hosts post the real key with `keystrokeModifiers` and do not insert text into the client's input responder.
+- `click` is a tap at a normalised point on the frame the client shows. `count` is 2 or 3 for the second or third click of a series, so the host can post a double- or triple-click. Absent means 1.
+- `pointer` is one step of a press, drag or scroll, at a normalised point. `phase` is `down`, `move`, `up` or `scroll`. A drag is `down`, then `move` any number of times, then `up`. `scroll` carries `dx` and `dy` in points: a positive `dy` moves the content down. `phase` is a string, so a host ignores a phase it does not know. A client sends `pointer` and `count` only to a host that set `supportsPointer`, because an older host would click at every drag step.
 
 A receiver rejects a whole message when its `type` is unknown, or its payload is missing or has the wrong shape. Receivers ignore rejected messages and keep the session.
