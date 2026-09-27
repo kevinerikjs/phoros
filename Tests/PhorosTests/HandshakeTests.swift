@@ -29,6 +29,7 @@ final class HandshakeTests: XCTestCase {
         XCTAssertFalse(peer.supportsAudioToggle)
         XCTAssertFalse(peer.supportsWindowSelection)
         XCTAssertFalse(peer.supportsControllerInput)
+        XCTAssertFalse(peer.supportsPointer)
         XCTAssertTrue(peer.wantsAudio)
         XCTAssertEqual(peer.remoteHosts, [])
         XCTAssertEqual(peer.controls, [])
@@ -126,5 +127,11 @@ final class HandshakeTests: XCTestCase {
         let object = try JSONSerialization.jsonObject(with: data) as! [String: Any]
         XCTAssertEqual(Set(object.keys), ["id", "symbol", "label", "mode"])
         XCTAssertEqual(try JSONDecoder().decode(ControlButton.self, from: data), button)
+    }
+
+    func testSupportsPointerIsPinned() throws {
+        let json = #"{"type":"auth_success","supportsPointer":true}"#
+        let message = try JSONDecoder().decode(PairingMessage.self, from: Data(json.utf8))
+        XCTAssertTrue(PeerCapabilities(message).supportsPointer)
     }
 }

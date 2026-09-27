@@ -14,6 +14,7 @@ public struct HostCapabilities: Equatable, Sendable {
     /// The host replays `.input` packets into a virtual game controller
     /// (see `PhorosInput.VirtualGamepad`).
     public var supportsControllerInput: Bool
+    public var supportsPointer: Bool
     /// The host answers `.clockProbe`. See `PairingMessage.supportsClockSync`.
     public var supportsClockSync: Bool
 
@@ -26,7 +27,8 @@ public struct HostCapabilities: Equatable, Sendable {
         supportsWindowSelection: Bool = false,
         controls: [ControlButton] = [],
         supportsControllerInput: Bool = false,
-        supportsClockSync: Bool = false
+        supportsClockSync: Bool = false,
+        supportsPointer: Bool = false
     ) {
         self.deviceName = deviceName
         self.remoteHosts = remoteHosts
@@ -36,6 +38,7 @@ public struct HostCapabilities: Equatable, Sendable {
         self.supportsWindowSelection = supportsWindowSelection
         self.controls = controls
         self.supportsControllerInput = supportsControllerInput
+        self.supportsPointer = supportsPointer
         self.supportsClockSync = supportsClockSync
     }
 
@@ -50,7 +53,8 @@ public struct HostCapabilities: Equatable, Sendable {
             supportsWindowSelection: supportsWindowSelection ? true : nil,
             controls: controls.isEmpty ? nil : controls,
             supportsControllerInput: supportsControllerInput ? true : nil,
-            supportsClockSync: supportsClockSync ? true : nil
+            supportsClockSync: supportsClockSync ? true : nil,
+            supportsPointer: supportsPointer ? true : nil
         )
     }
 }
