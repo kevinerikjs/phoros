@@ -17,6 +17,7 @@ public struct HostCapabilities: Equatable, Sendable {
     public var supportsPointer: Bool
     /// The host answers `.clockProbe`. See `PairingMessage.supportsClockSync`.
     public var supportsClockSync: Bool
+    public var maximumVideoDimension: Int?
 
     public init(
         deviceName: String? = nil,
@@ -28,7 +29,8 @@ public struct HostCapabilities: Equatable, Sendable {
         controls: [ControlButton] = [],
         supportsControllerInput: Bool = false,
         supportsClockSync: Bool = false,
-        supportsPointer: Bool = false
+        supportsPointer: Bool = false,
+        maximumVideoDimension: Int? = nil
     ) {
         self.deviceName = deviceName
         self.remoteHosts = remoteHosts
@@ -40,6 +42,7 @@ public struct HostCapabilities: Equatable, Sendable {
         self.supportsControllerInput = supportsControllerInput
         self.supportsPointer = supportsPointer
         self.supportsClockSync = supportsClockSync
+        self.maximumVideoDimension = maximumVideoDimension
     }
 
     fileprivate func message(_ type: PairingMessageType) -> PairingMessage {
@@ -54,7 +57,8 @@ public struct HostCapabilities: Equatable, Sendable {
             controls: controls.isEmpty ? nil : controls,
             supportsControllerInput: supportsControllerInput ? true : nil,
             supportsClockSync: supportsClockSync ? true : nil,
-            supportsPointer: supportsPointer ? true : nil
+            supportsPointer: supportsPointer ? true : nil,
+            maximumVideoDimension: maximumVideoDimension
         )
     }
 }

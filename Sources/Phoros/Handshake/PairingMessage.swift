@@ -126,6 +126,9 @@ public struct PairingMessage: Codable, Equatable, Sendable {
     /// the client sends plain single clicks only: an older host would turn
     /// every drag update into a separate click.
     public var supportsPointer: Bool?
+    /// Host display's longest pixel edge, used to avoid offering quality presets
+    /// that would exceed the Mac's native resolution.
+    public var maximumVideoDimension: Int?
 
     /// Buttons the host would like the client to show, in order. Absent means
     /// the client shows its built-in media keys.
@@ -190,7 +193,8 @@ public struct PairingMessage: Codable, Equatable, Sendable {
         wantsAudio: Bool? = nil,
         supportsClockSync: Bool? = nil,
         maximumFrameRate: Double? = nil,
-        supportsPointer: Bool? = nil
+        supportsPointer: Bool? = nil,
+        maximumVideoDimension: Int? = nil
     ) {
         self.type = type
         self.deviceName = deviceName
@@ -214,6 +218,7 @@ public struct PairingMessage: Codable, Equatable, Sendable {
         self.supportsClockSync = supportsClockSync
         self.maximumFrameRate = maximumFrameRate
         self.supportsPointer = supportsPointer
+        self.maximumVideoDimension = maximumVideoDimension
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -227,6 +232,7 @@ public struct PairingMessage: Codable, Equatable, Sendable {
         case preferredAudioSampleRate, supportedAudioCodecs, supportedVideoCodecs, wantsAudio
         case supportsClockSync, maximumFrameRate
         case supportsPointer
+        case maximumVideoDimension
     }
 }
 

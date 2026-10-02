@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.6.0
+
+Protocol version stays 1. Additive.
+
+- `Phoros`: `QualityPreset` adds 1440p, 2160p, and display-native 30/60 fps presets. `PairingMessage.maximumVideoDimension` lets a host advertise the selected display's long-edge limit to clients.
+
 ## 1.5.0
 
 Protocol version stays 1. Additive.
