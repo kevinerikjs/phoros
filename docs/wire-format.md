@@ -25,6 +25,39 @@ Receivers tell them apart by the first four bytes. A packet starts with the magi
 
 Receivers must check the frame length against a limit before they allocate. `FrameDecoder` does this.
 
+## Encrypted connections
+
+Since 1.7.0 a connection can be encrypted. A client opens with a `secure_hello` only to a host that advertised `supportsEncryption`. An older host does not know the message and ignores it. The first two frames are bare JSON in the clear:
+
+```
+client → host   {"type":"secure_hello","mode":"authenticate","deviceID":"…","key":"<X25519 public key, base64>","nonce":"<32 bytes, base64>"}
+host → client   {"type":"secure_accept","key":"…","nonce":"…","proof":"<HMAC-SHA256, base64>"}
+            or  {"type":"secure_reject","error":"unknown_device"}
+```
+
+`mode` is `pair` for a client that has no secret yet, and then `deviceID` is absent. Every later frame in both directions has its body sealed with AES-256-GCM. The length prefix stays in the clear and counts the sealed body:
+
+```
+offset  size  field
+     0     4  length of what follows, UInt32 (plaintext length + 16)
+     4     …  ciphertext
+     …    16  GCM tag
+```
+
+The nonce is never sent. It is four zero bytes followed by a UInt64 frame counter, one counter per direction, starting at 0. A frame that does not open ends the connection. That includes a frame that was dropped, replayed or reordered.
+
+Keys:
+
+```
+transcript = "phoros-secure/1" ‖ mode ‖ UInt32(len(deviceID)) ‖ deviceID ‖ clientKey ‖ clientNonce ‖ hostKey ‖ hostNonce
+ikm        = X25519(client, host) ‖ sharedSecret        (the 32 secret bytes; omitted when mode is pair)
+okm        = HKDF-SHA256(ikm, salt: SHA-256(transcript), info: "phoros-secure/1 keys", 96 bytes)
+             client→host key = okm[0..<32], host→client key = okm[32..<64], confirm key = okm[64..<96]
+proof      = HMAC-SHA256(confirm key, "phoros-secure/1 host")
+```
+
+The client checks `proof` before it sends anything sealed. Inside the sealed connection the session runs exactly as on a plaintext one: `hello`, `code_verify`, `auth_request` and the rest, unchanged. `SecureChannelTests.testKeySchedulePinned` pins these bytes.
+
 ## Packet header
 
 Ten bytes.
@@ -188,6 +221,7 @@ JSON object. `type` is required. Every other key is optional and omitted when no
 | `supportsClockSync` | bool | auth_success | host answers `clock_probe` with `clock_reply`. Added in package 1.4.0 |
 | `supportsPointer` | bool | pair_success, auth_success | host acts on `media_key.pointer` and `click.count`. Absent means the client sends single clicks only. Added in package 1.5.0 |
 | `maximumVideoDimension` | number | pair_success, auth_success | the longest pixel edge of the display the host streams. A client hides presets bigger than this. Absent means the client assumes 1920 and offers nothing above 1080p. Added in package 1.6.0 |
+| `supportsEncryption` | bool | pair_success, auth_success | host accepts `secure_hello`. A client that has seen it should remember it for that host and refuse plaintext from then on. Added in package 1.7.0 |
 
 Codec lists are strings, not enums. An unknown future codec then cannot fail decoding of the message that carries the credentials. Receivers ignore unknown names.
 

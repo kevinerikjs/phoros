@@ -18,6 +18,8 @@ public struct HostCapabilities: Equatable, Sendable {
     /// The host answers `.clockProbe`. See `PairingMessage.supportsClockSync`.
     public var supportsClockSync: Bool
     public var maximumVideoDimension: Int?
+    /// The host accepts `secure_hello`. See `PairingMessage.supportsEncryption`.
+    public var supportsEncryption: Bool
 
     public init(
         deviceName: String? = nil,
@@ -30,7 +32,8 @@ public struct HostCapabilities: Equatable, Sendable {
         supportsControllerInput: Bool = false,
         supportsClockSync: Bool = false,
         supportsPointer: Bool = false,
-        maximumVideoDimension: Int? = nil
+        maximumVideoDimension: Int? = nil,
+        supportsEncryption: Bool = false
     ) {
         self.deviceName = deviceName
         self.remoteHosts = remoteHosts
@@ -43,6 +46,7 @@ public struct HostCapabilities: Equatable, Sendable {
         self.supportsPointer = supportsPointer
         self.supportsClockSync = supportsClockSync
         self.maximumVideoDimension = maximumVideoDimension
+        self.supportsEncryption = supportsEncryption
     }
 
     fileprivate func message(_ type: PairingMessageType) -> PairingMessage {
@@ -58,7 +62,8 @@ public struct HostCapabilities: Equatable, Sendable {
             supportsControllerInput: supportsControllerInput ? true : nil,
             supportsClockSync: supportsClockSync ? true : nil,
             supportsPointer: supportsPointer ? true : nil,
-            maximumVideoDimension: maximumVideoDimension
+            maximumVideoDimension: maximumVideoDimension,
+            supportsEncryption: supportsEncryption ? true : nil
         )
     }
 }

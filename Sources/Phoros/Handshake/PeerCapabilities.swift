@@ -54,6 +54,9 @@ public struct PeerCapabilities: Equatable, Sendable {
     /// The peer answers `.clockProbe` with `.clockReply`.
     public var supportsClockSync: Bool
 
+    /// The peer accepts an encrypted connection (`secure_hello`).
+    public var supportsEncryption: Bool
+
     /// The highest video frame rate the peer asked for, or `nil` for the
     /// preset's own rate. See `PairingMessage.maximumFrameRate`.
     public var maximumFrameRate: Double?
@@ -76,6 +79,7 @@ public struct PeerCapabilities: Equatable, Sendable {
         supportsControllerInput = message.supportsControllerInput ?? false
         supportsPointer = message.supportsPointer ?? false
         supportsClockSync = message.supportsClockSync ?? false
+        supportsEncryption = message.supportsEncryption ?? false
         maximumFrameRate = message.maximumFrameRate.flatMap { $0 > 0 ? $0 : nil }
     }
 

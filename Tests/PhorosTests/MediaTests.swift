@@ -99,6 +99,7 @@ final class MediaTests: XCTestCase {
     func testQualityPresetNamesArePinned() {
         XCTAssertEqual(QualityPreset.allCases.map(\.rawValue), [
             "auto", "360p30", "480p30", "720p30", "720p60", "1080p30", "1080p60",
+            "1440p30", "1440p60", "2160p30", "2160p60", "native30", "native60",
         ])
         XCTAssertEqual(QualityPreset.p720_60.width, 1280)
         XCTAssertEqual(QualityPreset.p720_60.height, 720)

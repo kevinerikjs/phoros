@@ -23,6 +23,24 @@ link.send(bytes)                  // adds the length prefix
 
 A frame is `.packet(DecodedPacket)` or `.message(Data)`. The host sends everything as a packet. The client sends JSON bare and wraps only binary payloads. Handle both forms on both sides.
 
+### Encrypting it
+
+Pass `security:` and the connection seals every frame. The rest of this page stays the same, because the handshake runs before `onReady`.
+
+```swift
+// client, to a host that advertised supportsEncryption
+let link = PhorosConnection(to: endpoint, security: .client(.pair))                                    // pairing
+let link = PhorosConnection(to: endpoint, security: .client(.authenticate(deviceID: id, secret: s)))   // every time after
+
+// host
+let link = PhorosConnection(accepting: nwConnection, security: .host(
+    storedSecret: { deviceID in keychain.secret(for: deviceID) },
+    allowsPlaintext: true                     // still serve clients from before 1.7.0
+))
+```
+
+A client gets `.secureChannelFailed(.unknownDevice)` when the host has forgotten it. Pair again. `.hostNotAuthenticated` means the other end does not hold the secret. Treat it as a different machine, not a network error. On the host, `link.secureDeviceID` says which device's secret the keys came from: reject an `auth_request` for any other device. See [SECURITY.md](../SECURITY.md) for what this protects.
+
 ## Pairing, once
 
 The person reads a six-digit code from the host's screen and types it on the client. The code never crosses the wire.

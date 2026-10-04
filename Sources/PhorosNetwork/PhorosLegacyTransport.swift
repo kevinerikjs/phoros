@@ -104,19 +104,22 @@ public final class PhorosLegacyTransport: PhorosRealtimeTransport, @unchecked Se
     /// An outbound connection (client).
     public convenience init(
         to endpoint: NWEndpoint,
+        security: PhorosConnectionSecurity = .none,
         options: LegacyTransportOptions = LegacyTransportOptions(role: .client),
         queue: DispatchQueue = DispatchQueue(label: "phoros.transport", qos: .userInteractive)
     ) {
-        self.init(link: PhorosConnection(to: endpoint, parameters: PhorosConnection.parameters(), queue: queue), options: options, queue: queue)
+        self.init(link: PhorosConnection(to: endpoint, parameters: PhorosConnection.parameters(), security: security, queue: queue),
+                  options: options, queue: queue)
     }
 
     /// An inbound connection handed over by an `NWListener` (host).
     public convenience init(
         accepting connection: NWConnection,
+        security: PhorosConnectionSecurity = .none,
         options: LegacyTransportOptions = LegacyTransportOptions(role: .host),
         queue: DispatchQueue = DispatchQueue(label: "phoros.transport", qos: .userInteractive)
     ) {
-        self.init(link: PhorosConnection(accepting: connection, queue: queue), options: options, queue: queue)
+        self.init(link: PhorosConnection(accepting: connection, security: security, queue: queue), options: options, queue: queue)
     }
 
     public init(link: PhorosConnection, options: LegacyTransportOptions, queue: DispatchQueue) {
@@ -430,16 +433,18 @@ public final class PhorosLegacyTransport: PhorosRealtimeTransport, @unchecked Se
             lastWriteAt = Date()
             if write.lane == .video { lastVideoWriteAt = lastWriteAt }
             if write.tag > 0 { onTrace?(.videoHandedToLink(frame: UInt32(write.tag - 1), linkBacklog: scheduler.transportBacklog)) }
-            link.connection.send(content: write.data, completion: .contentProcessed { [weak self] error in
+            // sendFramed seals each frame on an encrypted link; the kernel counts the sealed bytes.
+            var wireBytes = write.data.count
+            wireBytes = link.sendFramed(write.data) { [weak self] error in
                 guard let self else { return }
                 self.queue.async {
                     if write.tag > 0 { self.onTrace?(.videoAcceptedByLink(frame: UInt32(write.tag - 1))) }
                     self.scheduler.completed(write)
-                    self.bytesAccepted += write.data.count
+                    self.bytesAccepted += wireBytes
                     if error != nil { self.link.cancel(); return }
                     self.drain()
                 }
-            })
+            }
         }
     }
 }

@@ -6,16 +6,20 @@ import PhorosSession
 
 /// A host transport and a client transport over a loopback TCP listener: what one sends
 /// the other receives as the unit it was sent as, and the wire between them is the v1 wire.
-final class LegacyTransportTests: XCTestCase {
+class LegacyTransportTests: XCTestCase {
     var listener: NWListener!
     var host: PhorosLegacyTransport!
     var client: PhorosLegacyTransport!
+
+    /// Overridden by `EncryptedLegacyTransportTests` to run every test here over a sealed link.
+    var hostSecurity: PhorosConnectionSecurity { .none }
+    var clientSecurity: PhorosConnectionSecurity { .none }
 
     override func setUpWithError() throws {
         listener = try NWListener(using: PhorosConnection.parameters(), on: .any)
         let accepted = expectation(description: "accepted")
         listener.newConnectionHandler = { [self] connection in
-            host = PhorosLegacyTransport(accepting: connection, options: LegacyTransportOptions(role: .host, probeInterval: 0.05, keepAwakeInterval: 0))
+            host = PhorosLegacyTransport(accepting: connection, security: hostSecurity, options: LegacyTransportOptions(role: .host, probeInterval: 0.05, keepAwakeInterval: 0))
             accepted.fulfill()
         }
         let ready = expectation(description: "listening")
@@ -23,11 +27,14 @@ final class LegacyTransportTests: XCTestCase {
         listener.start(queue: DispatchQueue(label: "test.listener"))
         wait(for: [ready], timeout: 5)
         let port = listener.port!
-        client = PhorosLegacyTransport(to: .hostPort(host: "127.0.0.1", port: port))
+        client = PhorosLegacyTransport(to: .hostPort(host: "127.0.0.1", port: port), security: clientSecurity)
         let clientReady = expectation(description: "client ready")
         client.onReady = { clientReady.fulfill() }
         client.start()
-        wait(for: [accepted, clientReady], timeout: 5)
+        wait(for: [accepted], timeout: 5)
+        // An encrypted client is ready only once the host has answered its hello.
+        if case .client = clientSecurity { host.start() }
+        wait(for: [clientReady], timeout: 5)
     }
 
     override func tearDown() {

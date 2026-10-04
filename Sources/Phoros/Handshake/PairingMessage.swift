@@ -130,6 +130,14 @@ public struct PairingMessage: Codable, Equatable, Sendable {
     /// that would exceed the Mac's native resolution.
     public var maximumVideoDimension: Int?
 
+    /// `true` from hosts that accept an encrypted connection (`secure_hello`,
+    /// see `SecureChannel`). Absent means the host only speaks the plaintext
+    /// wire, so a client must not open with `secure_hello`: an older host
+    /// ignores it and the connection stalls. Sent on `.pairSuccess` and
+    /// `.authSuccess`. A client that has seen it should remember it for that
+    /// host and refuse plaintext from then on.
+    public var supportsEncryption: Bool?
+
     /// Buttons the host would like the client to show, in order. Absent means
     /// the client shows its built-in media keys.
     public var controls: [ControlButton]?
@@ -194,7 +202,8 @@ public struct PairingMessage: Codable, Equatable, Sendable {
         supportsClockSync: Bool? = nil,
         maximumFrameRate: Double? = nil,
         supportsPointer: Bool? = nil,
-        maximumVideoDimension: Int? = nil
+        maximumVideoDimension: Int? = nil,
+        supportsEncryption: Bool? = nil
     ) {
         self.type = type
         self.deviceName = deviceName
@@ -219,6 +228,7 @@ public struct PairingMessage: Codable, Equatable, Sendable {
         self.maximumFrameRate = maximumFrameRate
         self.supportsPointer = supportsPointer
         self.maximumVideoDimension = maximumVideoDimension
+        self.supportsEncryption = supportsEncryption
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -233,6 +243,7 @@ public struct PairingMessage: Codable, Equatable, Sendable {
         case supportsClockSync, maximumFrameRate
         case supportsPointer
         case maximumVideoDimension
+        case supportsEncryption
     }
 }
 

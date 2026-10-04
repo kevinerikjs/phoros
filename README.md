@@ -33,6 +33,7 @@ iPad app       →  Mac, touch and text back
 
 **Transport, v1 (`PhorosNetwork`)**
 - Length-prefixed framing over one TCP connection, bounded frame size, 10-byte packet header.
+- Encrypted connections: a fresh X25519 exchange mixed with the pairing secret, then every frame sealed with AES-256-GCM. 16 bytes and about a microsecond per frame. See [SECURITY.md](SECURITY.md).
 - Video fragmentation and reassembly at a configurable MTU (1400 bytes default).
 - Send scheduler with three lanes (control, audio, video). Video is shed by queue age and by a byte budget derived from unacknowledged kernel bytes. Audio is never shed for longer than one second.
 - Bitrate control from the round trip of a probe on the media connection.
@@ -95,7 +96,7 @@ Everything else in that directory is upstream. Cryptography is `str0m-apple-cryp
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/kevinerikjs/phoros.git", exact: "1.6.0")
+    .package(url: "https://github.com/kevinerikjs/phoros.git", exact: "1.7.0")
 ],
 targets: [
     .target(name: "MyHost", dependencies: [

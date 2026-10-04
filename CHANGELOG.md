@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.7.0
+
+Protocol version stays 1. Additive on the wire. One source change for exhaustive switches.
+
+- Encrypted connections (BEAM-104). Before this release the TCP connection was plaintext. It carried the pairing secret, every key press, click and typed character, and the video too after a fallback to TCP. `PhorosConnection` and `PhorosLegacyTransport` now take `security:`. On an encrypted connection the client opens with `secure_hello`. Both sides run X25519 and mix in the pairing secret. Every frame after that is sealed with AES-256-GCM. The session inside is unchanged. The wire is in [wire-format.md](docs/wire-format.md#encrypted-connections) and the threat model in [SECURITY.md](SECURITY.md).
+- `PhorosSession`: `SecureChannelClient`, `SecureChannelHost`, `SecureHandshakeMessage`, `FrameCipher` and `SecureChannelError`.
+- `PhorosNetwork`: `PhorosConnectionSecurity`; `PhorosConnection.isEncrypted`, `secureDeviceID`, `handshakeTimeout`, and `sendFramed(_:completion:)`, which seals frames that were already length-prefixed. `PhorosLegacyTransport` writes through it. A host given `.host(storedSecret:allowsPlaintext:)` serves an older plaintext client only when `allowsPlaintext` is set.
+- `Phoros`: `supportsEncryption` capability (`PairingMessage`, `PeerCapabilities`, `HostCapabilities`).
+- Source change: `PhorosConnectionEnd` has a new case, `.secureChannelFailed(SecureChannelError)`. A switch over it that lists every case needs one more.
+- Cost: 16 bytes per frame, about 1 µs of AES-GCM per 1.4 KB packet on each side (Apple M4).
+- Fix: the quality preset pin test still listed the presets from before 1.6.0.
+
 ## 1.6.0
 
 Protocol version stays 1. Additive.
