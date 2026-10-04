@@ -60,7 +60,7 @@ The v2 transport is WebRTC's transport layer: ICE, DTLS, SRTP, RTP and SCTP data
 
 **Input (`PhorosInput`)**
 - Virtual HID gamepad on a macOS host, presented as an Xbox Wireless Controller or a DualShock 4, with analog triggers and both sticks.
-- Controller sampling on the client, keyboard, text, media keys, and clicks mapped from the client's view back to screen coordinates.
+- Controller sampling on the client. Keyboard, text, named desktop keys (Escape, Tab, arrows, F1 to F12), media keys, and pointer input on the host: single, double and triple clicks, right-click, press-drag-release and scrolling, mapped from the client's view back to screen coordinates.
 
 ## Products
 
@@ -95,7 +95,7 @@ Everything else in that directory is upstream. Cryptography is `str0m-apple-cryp
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/kevinerikjs/phoros.git", exact: "1.4.2")
+    .package(url: "https://github.com/kevinerikjs/phoros.git", exact: "1.6.0")
 ],
 targets: [
     .target(name: "MyHost", dependencies: [
@@ -296,11 +296,11 @@ The handshake carries no version number. Negotiate on capabilities. [docs/compat
 swift test
 ```
 
-136 tests, no network and no hardware required.
+139 tests, no network and no hardware required.
 
 | Suite | Tests | Coverage |
 |---|---:|---|
-| `PhorosTests` | 45 | Exact bytes of every header and exact JSON of every message as shipped peers write them. |
+| `PhorosTests` | 48 | Exact bytes of every header and exact JSON of every message as shipped peers write them. |
 | `PhorosSessionTests` | 42 | Pairing and auth state machines, capability defaults, reassembly, audio sequencing, scheduling and shedding, clock sync. Each incident in the compatibility doc has a test. |
 | `PhorosInputTests` | 17 | HID report descriptor byte for byte, wire-report to HID mapping, tap-to-source geometry. |
 | `PhorosMediaTests` | 15 | Format description from real SPS/PPS bytes, audio round trip through AAC encoder and decoder. |

@@ -187,6 +187,7 @@ JSON object. `type` is required. Every other key is optional and omitted when no
 | `maximumFrameRate` | number | auth_request | the highest video frame rate the client wants, normally its display's refresh rate. A host raises a 60 fps preset toward the lower of this and its own display. Absent means the preset's rate. Added in package 1.4.0 |
 | `supportsClockSync` | bool | auth_success | host answers `clock_probe` with `clock_reply`. Added in package 1.4.0 |
 | `supportsPointer` | bool | pair_success, auth_success | host acts on `media_key.pointer` and `click.count`. Absent means the client sends single clicks only. Added in package 1.5.0 |
+| `maximumVideoDimension` | number | pair_success, auth_success | the longest pixel edge of the display the host streams. A client hides presets bigger than this. Absent means the client assumes 1920 and offers nothing above 1080p. Added in package 1.6.0 |
 
 Codec lists are strings, not enums. An unknown future codec then cannot fail decoding of the message that carries the credentials. Receivers ignore unknown names.
 
@@ -232,7 +233,7 @@ JSON object with `type` and, for some types, `payload`. The client sends it bare
 | `transport_answer` | client → host | the same shape, the client's side of it. Added in package 1.4.2 |
 | `transport_fallback` | host → client | none. Media and input are back on this connection. Added in package 1.4.2 |
 
-Preset names: `auto`, `360p30`, `480p30`, `720p30`, `720p60`, `1080p30`, `1080p60`.
+Preset names: `auto`, `360p30`, `480p30`, `720p30`, `720p60`, `1080p30`, `1080p60`, and since 1.6.0 `1440p30`, `1440p60`, `2160p30`, `2160p60`, `native30` and `native60`. A native preset streams at the host display's own resolution. Which presets `auto` moves between is up to the host; Beacon keeps it at 1080p or below.
 
 ### clock_probe and clock_reply
 
